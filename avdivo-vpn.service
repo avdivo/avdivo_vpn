@@ -1,0 +1,16 @@
+[Unit]
+Description=Avdivo VPN config generator
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/etc/wireguard-config
+EnvironmentFile=/etc/wireguard-config/.env
+ExecStart=/usr/bin/python3 /etc/wireguard-config/server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

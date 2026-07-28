@@ -1,0 +1,11 @@
+# secrets
+.env
+
+# generated configs
+configs/*.conf
+
+# device registry
+devices.csv
+
+# pycache
+__pycache__/
