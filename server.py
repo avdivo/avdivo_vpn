@@ -139,7 +139,7 @@ __MSG__
   </form>
 </div>
 <table>
-<thead><tr><th>№</th><th>Имя</th><th>IP</th><th>Дата</th><th>Статус</th><th></th><th></th></tr></thead>
+<thead><tr><th>№</th><th>Имя</th><th>IP</th><th>Дата</th><th>Статус</th><th>Файл</th><th></th><th></th></tr></thead>
 <tbody>
 __ROWS__
 </tbody>
@@ -155,6 +155,7 @@ ROWS_TPL = """\
   <td>{ip}</td>
   <td>{date}</td>
   <td>{status_badge}</td>
+  <td><a class="link" href="/wg/download?name={name}">Скачать</a></td>
   <td><form method="POST" style="margin:0"><input type="hidden" name="action" value="toggle"><input type="hidden" name="name" value="{name}">{toggle_btn}</form></td>
   <td><form method="POST" style="margin:0" onsubmit="return confirm('Удалить устройство {name}?')"><input type="hidden" name="action" value="delete"><input type="hidden" name="name" value="{name}"><button class="btn-sm btn-danger" type="submit">Удалить</button></form></td>
 </tr>"""
