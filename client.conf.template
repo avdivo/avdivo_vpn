@@ -4,7 +4,7 @@ Address = __ADDRESS__/24
 DNS = 1.1.1.1
 
 [Peer]
-PublicKey = QrsyvITrXZA1a4eGj42WHXNIA11pIYX6xLmE24hAjWs=
+PublicKey = MaYZL/DNVnvrMHnqu7fh8yFLFaZs+sbRvdNWOB5nznI=
 AllowedIPs = 0.0.0.0/0, ::/0
 Endpoint = 46.8.112.244:51820
 PersistentKeepalive = 25
