@@ -43,7 +43,7 @@ PAGE = """\
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WireGuard VPN</title>
+<title>avdivo VPN</title>
 <style>
   *,*::before,*::after{box-sizing:border-box}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Oxygen,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;display:flex;align-items:center;justify-content:center;margin:0;padding:1rem}
@@ -66,7 +66,7 @@ PAGE = """\
 </head>
 <body>
 <div class="card">
-  <h2>WireGuard VPN</h2>
+  <h2>avdivo VPN</h2>
   <p>Создать или отозвать конфиг устройства</p>
   __MSG__
   <div class="section-title">Создать</div>
