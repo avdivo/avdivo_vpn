@@ -22,6 +22,20 @@ if not os.path.exists(CSV_PATH):
     with open(CSV_PATH, "w") as f:
         f.write("number|ip|date|name|pubkey\n")
 
+
+def read_devices():
+    with open(CSV_PATH) as f:
+        return list(csv.DictReader(f, delimiter="|"))
+
+
+def write_devices(rows):
+    with open(CSV_PATH, "w") as f:
+        f.write("number|ip|date|name|pubkey\n")
+        w = csv.DictWriter(f, fieldnames=["number", "ip", "date", "name", "pubkey"], delimiter="|")
+        for r in rows:
+            w.writerow(r)
+
+
 PAGE = """\
 <!DOCTYPE html>
 <html lang="en">
@@ -32,7 +46,7 @@ PAGE = """\
 <style>
   *,*::before,*::after{box-sizing:border-box}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Oxygen,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;display:flex;align-items:center;justify-content:center;margin:0;padding:1rem}
-  .card{background:#1e293b;border-radius:1rem;padding:2.5rem;width:100%;max-width:420px;box-shadow:0 25px 50px -12px rgba(0,0,0,.5)}
+  .card{background:#1e293b;border-radius:1rem;padding:2.5rem;width:100%;max-width:460px;box-shadow:0 25px 50px -12px rgba(0,0,0,.5)}
   h2{margin:0 0 .5rem;font-size:1.5rem;font-weight:600}
   p{color:#94a3b8;margin:0 0 1.5rem;font-size:.9rem}
   label{display:block;font-size:.85rem;font-weight:500;margin-bottom:.35rem;color:#cbd5e1}
@@ -40,23 +54,38 @@ PAGE = """\
   input:focus{border-color:#6366f1}
   button{width:100%;padding:.7rem;border:none;border-radius:.5rem;background:#6366f1;color:#fff;font-size:1rem;font-weight:600;cursor:pointer;transition:background .15s}
   button:hover{background:#4f46e5}
+  .btn-danger{background:#dc2626}
+  .btn-danger:hover{background:#b91c1c}
   .error{background:#7f1d1d;color:#fca5a5;padding:.65rem;border-radius:.5rem;margin-bottom:1rem;font-size:.85rem;text-align:center}
+  .success{background:#14532d;color:#86efac;padding:.65rem;border-radius:.5rem;margin-bottom:1rem;font-size:.85rem;text-align:center}
+  .divider{border:none;border-top:1px solid #334155;margin:1.5rem 0}
   .hint{text-align:center;margin-top:1rem;font-size:.8rem;color:#475569}
+  .section-title{font-size:.9rem;font-weight:500;color:#94a3b8;margin-bottom:1rem}
 </style>
 </head>
 <body>
 <div class="card">
   <h2>WireGuard config</h2>
-  <p>Сгенерировать конфиг для нового устройства</p>
+  <p>Сгенерировать или отозвать конфиг устройства</p>
   __MSG__
-  <form method="POST">
+  <div class="section-title">Создать новый</div>
+  <form method="POST" action="/wg/">
     <label for="pass">Password</label>
     <input type="password" id="pass" name="pass" required placeholder="••••••••">
     <label for="name">Device name</label>
     <input type="text" id="name" name="name" required placeholder="lena-win">
     <button type="submit">Generate config</button>
   </form>
-  <div class="hint">После генерации файл скачается автоматически</div>
+  <hr class="divider">
+  <div class="section-title">Отозвать устройство</div>
+  <form method="POST" action="/wg/revoke">
+    <label for="rpass">Password</label>
+    <input type="password" id="rpass" name="pass" required placeholder="••••••••">
+    <label for="rname">Device name</label>
+    <input type="text" id="rname" name="name" required placeholder="lena-win">
+    <button type="submit" class="btn-danger">Revoke config</button>
+  </form>
+  <div class="hint">После отзыва устройство потеряет доступ к VPN</div>
 </div>
 </body>
 </html>"""
@@ -70,11 +99,19 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(html.encode())
 
-    def _text(self, text, status=200):
-        self.send_response(status)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
+    def _file(self, path):
+        with open(path, "rb") as f:
+            data = f.read()
+        fname = os.path.basename(path)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Disposition", f"attachment; filename={fname}")
         self.end_headers()
-        self.wfile.write(text.encode())
+        self.wfile.write(data)
+
+    def _parse_post(self):
+        length = int(self.headers.get("Content-Length", 0))
+        return parse_qs(self.rfile.read(length).decode())
 
     def do_GET(self):
         if self.path not in ("/wg/", "/wg"):
@@ -83,11 +120,15 @@ class Handler(BaseHTTPRequestHandler):
         self._page()
 
     def do_POST(self):
-        if self.path not in ("/wg/", "/wg"):
+        if self.path == "/wg/revoke":
+            self._handle_revoke()
+        elif self.path in ("/wg/", "/wg"):
+            self._handle_generate()
+        else:
             self.send_error(404)
-            return
-        length = int(self.headers.get("Content-Length", 0))
-        params = parse_qs(self.rfile.read(length).decode())
+
+    def _handle_generate(self):
+        params = self._parse_post()
         pwd = params.get("pass", [""])[0]
         name = params.get("name", [""])[0]
 
@@ -100,30 +141,51 @@ class Handler(BaseHTTPRequestHandler):
 
         name = name.strip().replace(" ", "_")
 
+        devices = read_devices()
+        if any(d["name"] == name for d in devices):
+            self._page(f'<div class="error">Device "{name}" already exists</div>')
+            return
+
         try:
-            cfg_path = self.generate(name)
+            cfg_path = self.generate(name, devices)
         except Exception as e:
             self._page(f'<div class="error">Error: {e}</div>')
             return
 
-        with open(cfg_path, "rb") as f:
-            data = f.read()
-        fname = os.path.basename(cfg_path)
-        self.send_response(200)
-        self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("Content-Disposition", f"attachment; filename={fname}")
-        self.end_headers()
-        self.wfile.write(data)
+        self._file(cfg_path)
 
-    def generate(self, name):
+    def _handle_revoke(self):
+        params = self._parse_post()
+        pwd = params.get("pass", [""])[0]
+        name = params.get("name", [""])[0]
+
+        if pwd != PASSWORD:
+            self._page('<div class="error">Wrong password</div>')
+            return
+        if not name or not name.strip():
+            self._page('<div class="error">Device name is required</div>')
+            return
+
+        name = name.strip()
+
+        try:
+            self.revoke(name)
+        except ValueError as e:
+            self._page(f'<div class="error">{e}</div>')
+            return
+        except Exception as e:
+            self._page(f'<div class="error">Error: {e}</div>')
+            return
+
+        self._page(f'<div class="success">Device "{name}" revoked</div>')
+
+    def generate(self, name, devices):
         priv = subprocess.run(["wg", "genkey"], capture_output=True, text=True, check=True)
         privkey = priv.stdout.strip()
         pub = subprocess.run(["wg", "pubkey"], input=privkey, capture_output=True, text=True, check=True)
         pubkey = pub.stdout.strip()
 
-        with open(CSV_PATH) as f:
-            rows = list(csv.DictReader(f, delimiter="|"))
-        last_num = max((int(r["number"]) for r in rows), default=1)
+        last_num = max((int(d["number"]) for d in devices), default=1)
         new_num = last_num + 1
         ip = f"10.0.0.{new_num}"
 
@@ -144,6 +206,39 @@ class Handler(BaseHTTPRequestHandler):
             f.write(f"{new_num:02d}|{ip}|{date.today()}|{name}|{pubkey}\n")
 
         return cfg_path
+
+    def revoke(self, name):
+        devices = read_devices()
+        match = [d for d in devices if d["name"] == name]
+        if not match:
+            raise ValueError(f'Device "{name}" not found')
+        dev = match[0]
+
+        os.remove(f"{WG_DIR}/configs/wg{dev['number']}.conf")
+
+        devices = [d for d in devices if d["name"] != name]
+        write_devices(devices)
+
+        with open(WG_CONF) as f:
+            lines = f.readlines()
+
+        pk = dev["pubkey"]
+        new_lines = []
+        skip = False
+        for line in lines:
+            if line.startswith("[Peer]") and skip:
+                skip = False
+            if skip:
+                continue
+            if line.startswith("PublicKey =") and pk in line:
+                skip = True
+                continue
+            new_lines.append(line)
+
+        with open(WG_CONF, "w") as f:
+            f.writelines(new_lines)
+
+        subprocess.run(SYSCTL_RESTART, check=True)
 
 
 if __name__ == "__main__":
