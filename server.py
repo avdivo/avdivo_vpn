@@ -39,11 +39,11 @@ def write_devices(rows):
 
 PAGE = """\
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WireGuard config generator</title>
+<title>WireGuard VPN</title>
 <style>
   *,*::before,*::after{box-sizing:border-box}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Oxygen,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;display:flex;align-items:center;justify-content:center;margin:0;padding:1rem}
@@ -66,27 +66,27 @@ PAGE = """\
 </head>
 <body>
 <div class="card">
-  <h2>WireGuard config</h2>
-  <p>Сгенерировать или отозвать конфиг устройства</p>
+  <h2>WireGuard VPN</h2>
+  <p>Создать или отозвать конфиг устройства</p>
   __MSG__
-  <div class="section-title">Создать новый</div>
+  <div class="section-title">Создать</div>
   <form method="POST">
     <input type="hidden" name="action" value="generate">
-    <label for="pass">Password</label>
+    <label for="pass">Пароль</label>
     <input type="password" id="pass" name="pass" required placeholder="••••••••">
-    <label for="name">Device name</label>
+    <label for="name">Имя устройства</label>
     <input type="text" id="name" name="name" required placeholder="lena-win">
-    <button type="submit">Generate config</button>
+    <button type="submit">Создать конфиг</button>
   </form>
   <hr class="divider">
-  <div class="section-title">Отозвать устройство</div>
+  <div class="section-title">Отозвать</div>
   <form method="POST">
     <input type="hidden" name="action" value="revoke">
-    <label for="rpass">Password</label>
+    <label for="rpass">Пароль</label>
     <input type="password" id="rpass" name="pass" required placeholder="••••••••">
-    <label for="rname">Device name</label>
+    <label for="rname">Имя устройства</label>
     <input type="text" id="rname" name="name" required placeholder="lena-win">
-    <button type="submit" class="btn-danger">Revoke config</button>
+    <button type="submit" class="btn-danger">Отозвать конфиг</button>
   </form>
   <div class="hint">После отзыва устройство потеряет доступ к VPN</div>
 </div>
@@ -138,23 +138,23 @@ class Handler(BaseHTTPRequestHandler):
         name = params.get("name", [""])[0]
 
         if pwd != PASSWORD:
-            self._page('<div class="error">Wrong password</div>')
+            self._page('<div class="error">Неверный пароль</div>')
             return
         if not name or not name.strip():
-            self._page('<div class="error">Device name is required</div>')
+            self._page('<div class="error">Введите имя устройства</div>')
             return
 
         name = name.strip().replace(" ", "_")
 
         devices = read_devices()
         if any(d["name"] == name for d in devices):
-            self._page(f'<div class="error">Device "{name}" already exists</div>')
+            self._page(f'<div class="error">Устройство "{name}" уже существует</div>')
             return
 
         try:
             cfg_path = self.generate(name, devices)
         except Exception as e:
-            self._page(f'<div class="error">Error: {e}</div>')
+            self._page(f'<div class="error">Ошибка: {e}</div>')
             return
 
         self._file(cfg_path)
@@ -164,10 +164,10 @@ class Handler(BaseHTTPRequestHandler):
         name = params.get("name", [""])[0]
 
         if pwd != PASSWORD:
-            self._page('<div class="error">Wrong password</div>')
+            self._page('<div class="error">Неверный пароль</div>')
             return
         if not name or not name.strip():
-            self._page('<div class="error">Device name is required</div>')
+            self._page('<div class="error">Введите имя устройства</div>')
             return
 
         name = name.strip()
@@ -178,10 +178,10 @@ class Handler(BaseHTTPRequestHandler):
             self._page(f'<div class="error">{e}</div>')
             return
         except Exception as e:
-            self._page(f'<div class="error">Error: {e}</div>')
+            self._page(f'<div class="error">Ошибка: {e}</div>')
             return
 
-        self._page(f'<div class="success">Device "{name}" revoked</div>')
+        self._page(f'<div class="success">Устройство "{name}" отозвано</div>')
 
     def generate(self, name, devices):
         priv = subprocess.run(["wg", "genkey"], capture_output=True, text=True, check=True)
@@ -215,7 +215,7 @@ class Handler(BaseHTTPRequestHandler):
         devices = read_devices()
         match = [d for d in devices if d["name"] == name]
         if not match:
-            raise ValueError(f'Device "{name}" not found')
+            raise ValueError(f'Устройство "{name}" не найдено')
         dev = match[0]
 
         os.remove(f"{WG_DIR}/configs/wg{dev['number']}.conf")
