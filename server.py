@@ -270,16 +270,20 @@ class Handler(BaseHTTPRequestHandler):
         if action == "login":
             pwd = params.get("pass", [""])[0]
             if pwd == PASSWORD:
-                self._send_html("", cookie_header=self._cookie(PASSWORD, 86400 * 30))
-                self._redirect("Вход выполнен")
+                self.send_response(303)
+                self.send_header("Set-Cookie", self._cookie(PASSWORD, 86400 * 30))
+                self.send_header("Location", "/wg")
+                self.end_headers()
             else:
                 html = LOGIN_HTML.replace("__MSG__", '<div class="error">Неверный пароль</div>')
                 self._send_html(html)
             return
 
         if action == "logout":
-            self._send_html("", cookie_header=self._cookie("", 0))
-            self._redirect("Выход выполнен")
+            self.send_response(303)
+            self.send_header("Set-Cookie", self._cookie("", 0))
+            self.send_header("Location", "/wg?msg=Выход+выполнен&err=0")
+            self.end_headers()
             return
 
         if not self._authed():
