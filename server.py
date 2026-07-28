@@ -1,6 +1,5 @@
 import csv
 import os
-import secrets
 import subprocess
 import sys
 from datetime import date
@@ -10,8 +9,7 @@ from urllib.parse import parse_qs
 WG_DIR = "/etc/wireguard-config"
 WG_CONF = "/etc/wireguard/wg0.conf"
 TEMPLATE = "client.conf.template"
-SERVER_PUBKEY = "QrsyvITrXZA1a4eGj42WHXNIA11pIYX6xLmE24hAjWs="
-SERVER_ENDPOINT = "46.8.112.244:51820"
+SYSCTL_RESTART = ["systemctl", "restart", "wg-quick@wg0"]
 
 PASSWORD = os.environ.get("WG_PASSWORD", "")
 if not PASSWORD:
@@ -24,13 +22,53 @@ if not os.path.exists(CSV_PATH):
     with open(CSV_PATH, "w") as f:
         f.write("number|ip|date|name|pubkey\n")
 
+PAGE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WireGuard config generator</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Oxygen,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;display:flex;align-items:center;justify-content:center;margin:0;padding:1rem}
+  .card{background:#1e293b;border-radius:1rem;padding:2.5rem;width:100%;max-width:420px;box-shadow:0 25px 50px -12px rgba(0,0,0,.5)}
+  h2{margin:0 0 .5rem;font-size:1.5rem;font-weight:600}
+  p{color:#94a3b8;margin:0 0 1.5rem;font-size:.9rem}
+  label{display:block;font-size:.85rem;font-weight:500;margin-bottom:.35rem;color:#cbd5e1}
+  input{width:100%;padding:.65rem .85rem;border:1px solid #334155;border-radius:.5rem;background:#0f172a;color:#e2e8f0;font-size:.95rem;outline:none;transition:border-color .15s;margin-bottom:1rem}
+  input:focus{border-color:#6366f1}
+  button{width:100%;padding:.7rem;border:none;border-radius:.5rem;background:#6366f1;color:#fff;font-size:1rem;font-weight:600;cursor:pointer;transition:background .15s}
+  button:hover{background:#4f46e5}
+  .error{background:#7f1d1d;color:#fca5a5;padding:.65rem;border-radius:.5rem;margin-bottom:1rem;font-size:.85rem;text-align:center}
+  .hint{text-align:center;margin-top:1rem;font-size:.8rem;color:#475569}
+</style>
+</head>
+<body>
+<div class="card">
+  <h2>WireGuard config</h2>
+  <p>Сгенерировать конфиг для нового устройства</p>
+  __MSG__
+  <form method="POST">
+    <label for="pass">Password</label>
+    <input type="password" id="pass" name="pass" required placeholder="••••••••">
+    <label for="name">Device name</label>
+    <input type="text" id="name" name="name" required placeholder="lena-win">
+    <button type="submit">Generate config</button>
+  </form>
+  <div class="hint">После генерации файл скачается автоматически</div>
+</div>
+</body>
+</html>"""
+
 
 class Handler(BaseHTTPRequestHandler):
-    def _html(self, body):
+    def _page(self, msg=""):
+        html = PAGE.replace("__MSG__", msg)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
-        self.wfile.write(body.encode())
+        self.wfile.write(html.encode())
 
     def _text(self, text, status=200):
         self.send_response(status)
@@ -39,51 +77,43 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(text.encode())
 
     def do_GET(self):
-        if self.path != "/wg/" and self.path != "/wg":
+        if self.path not in ("/wg/", "/wg"):
             self.send_error(404)
             return
-        self._html(
-            "<html><body>"
-            "<h2>WireGuard config generator</h2>"
-            "<form method='POST'>"
-            "<label>Password: <input type='password' name='pass' required></label><br>"
-            "<label>Device name: <input name='name' required placeholder='lena-win'></label><br>"
-            "<button type='submit'>Generate config</button>"
-            "</form>"
-            "</body></html>"
-        )
+        self._page()
 
     def do_POST(self):
-        if self.path != "/wg/" and self.path != "/wg":
+        if self.path not in ("/wg/", "/wg"):
             self.send_error(404)
             return
         length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length).decode()
-        params = parse_qs(body)
+        params = parse_qs(self.rfile.read(length).decode())
         pwd = params.get("pass", [""])[0]
         name = params.get("name", [""])[0]
 
         if pwd != PASSWORD:
-            self._text("Wrong password", 403)
+            self._page('<div class="error">Wrong password</div>')
             return
         if not name or not name.strip():
-            self._text("Device name is required", 400)
+            self._page('<div class="error">Device name is required</div>')
             return
 
         name = name.strip().replace(" ", "_")
 
         try:
-            config = self.generate(name)
+            cfg_path = self.generate(name)
         except Exception as e:
-            self._text(f"Error: {e}", 500)
+            self._page(f'<div class="error">Error: {e}</div>')
             return
 
+        with open(cfg_path, "rb") as f:
+            data = f.read()
+        fname = os.path.basename(cfg_path)
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("Content-Disposition", f"attachment; filename={config}")
+        self.send_header("Content-Disposition", f"attachment; filename={fname}")
         self.end_headers()
-        with open(config, "rb") as f:
-            self.wfile.write(f.read())
+        self.wfile.write(data)
 
     def generate(self, name):
         priv = subprocess.run(["wg", "genkey"], capture_output=True, text=True, check=True)
@@ -98,25 +128,17 @@ class Handler(BaseHTTPRequestHandler):
         ip = f"10.0.0.{new_num}"
 
         with open(TEMPLATE) as f:
-            conf = (
-                f.read()
-                .replace("__PRIVATE_KEY__", privkey)
-                .replace("__ADDRESS__", ip)
-            )
+            conf = f.read().replace("__PRIVATE_KEY__", privkey).replace("__ADDRESS__", ip)
 
         cfg_path = f"{WG_DIR}/configs/wg{new_num:02d}.conf"
         with open(cfg_path, "w") as f:
             f.write(conf)
 
-        peer_block = (
-            f"\n[Peer]\n"
-            f"PublicKey = {pubkey}\n"
-            f"AllowedIPs = {ip}/32\n"
-        )
+        peer = f"\n[Peer]\nPublicKey = {pubkey}\nAllowedIPs = {ip}/32\n"
         with open(WG_CONF, "a") as f:
-            f.write(peer_block)
+            f.write(peer)
 
-        subprocess.run(["systemctl", "restart", "wg-quick@wg0"], check=True)
+        subprocess.run(SYSCTL_RESTART, check=True)
 
         with open(CSV_PATH, "a") as f:
             f.write(f"{new_num:02d}|{ip}|{date.today()}|{name}|{pubkey}\n")
