@@ -10,7 +10,7 @@ from urllib.parse import parse_qs
 WG_DIR = "/etc/wireguard-config"
 WG_CONF = "/etc/wireguard/wg0.conf"
 TEMPLATE = "client.conf.template"
-SYSCTL_RESTART = ["systemctl", "restart", "wg-quick@wg0"]
+WG_IFACE = "wg0"
 
 PASSWORD = os.environ.get("WG_PASSWORD", "")
 if not PASSWORD:
@@ -204,7 +204,7 @@ class Handler(BaseHTTPRequestHandler):
         with open(WG_CONF, "a") as f:
             f.write(peer)
 
-        subprocess.run(SYSCTL_RESTART, check=True)
+        subprocess.run(["wg", "set", WG_IFACE, "peer", pubkey, "allowed-ips", f"{ip}/32"], check=True)
 
         with open(CSV_PATH, "a") as f:
             f.write(f"{new_num:02d}|{ip}|{date.today()}|{name}|{pubkey}\n")
@@ -237,7 +237,7 @@ class Handler(BaseHTTPRequestHandler):
         with open(WG_CONF, "w") as f:
             f.write(content)
 
-        subprocess.run(SYSCTL_RESTART, check=True)
+        subprocess.run(["wg", "set", WG_IFACE, "peer", pk, "remove"], check=True)
 
 
 if __name__ == "__main__":
