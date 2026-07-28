@@ -114,7 +114,7 @@ class Handler(BaseHTTPRequestHandler):
         return parse_qs(self.rfile.read(length).decode())
 
     def do_GET(self):
-        if self.path not in ("/wg/", "/wg"):
+        if not self.path.startswith("/wg"):
             self.send_error(404)
             return
         self._page()
@@ -122,7 +122,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/wg/revoke":
             self._handle_revoke()
-        elif self.path in ("/wg/", "/wg"):
+        elif self.path.startswith("/wg"):
             self._handle_generate()
         else:
             self.send_error(404)
