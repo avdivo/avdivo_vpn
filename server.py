@@ -223,20 +223,19 @@ class Handler(BaseHTTPRequestHandler):
         write_devices(devices)
 
         with open(WG_CONF) as f:
-            lines = f.readlines()
+            content = f.read()
 
         pk = dev["pubkey"]
-        new_lines = []
-        skip = False
-        for line in lines:
-            if line.startswith("[Peer]") and skip:
-                skip = False
-            if skip:
-                continue
-            if line.startswith("PublicKey =") and pk in line:
-                skip = True
-                continue
-            new_lines.append(line)
+        import re
+        content = re.sub(
+            rf"\n\[Peer\]\nPublicKey = {re.escape(pk)}\nAllowedIPs = .*",
+            "",
+            content,
+        )
+        content = content.strip() + "\n"
+
+        with open(WG_CONF, "w") as f:
+            f.write(content)
 
         with open(WG_CONF, "w") as f:
             f.writelines(new_lines)
