@@ -1,5 +1,6 @@
 import csv
 import os
+import re
 import subprocess
 import sys
 from datetime import date
@@ -226,7 +227,6 @@ class Handler(BaseHTTPRequestHandler):
             content = f.read()
 
         pk = dev["pubkey"]
-        import re
         content = re.sub(
             rf"\n\[Peer\]\nPublicKey = {re.escape(pk)}\nAllowedIPs = .*",
             "",
@@ -236,9 +236,6 @@ class Handler(BaseHTTPRequestHandler):
 
         with open(WG_CONF, "w") as f:
             f.write(content)
-
-        with open(WG_CONF, "w") as f:
-            f.writelines(new_lines)
 
         subprocess.run(SYSCTL_RESTART, check=True)
 
