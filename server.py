@@ -336,10 +336,16 @@ class Handler(BaseHTTPRequestHandler):
             with open(CSV_PATH, "a") as f:
                 f.write(f"{new_num:02d}|{ip}|{date.today()}|{name}|{pubkey}|0\n")
 
-            self._file_response(cfg_path)
+            msg = f"Устройство '{name}' создано — <a href='/wg/download?name={name}' style='color:#86efac'>скачать конфиг</a>"
+            self._redirect(msg)
 
         except Exception as e:
             self._redirect(f"Ошибка: {e}", err=True)
+
+    def _redirect_to(self, url):
+        self.send_response(303)
+        self.send_header("Location", url)
+        self.end_headers()
 
     def _handle_toggle(self, params):
         name = params.get("name", [""])[0].strip()
