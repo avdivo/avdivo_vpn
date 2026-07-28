@@ -69,7 +69,8 @@ PAGE = """\
   <p>Сгенерировать или отозвать конфиг устройства</p>
   __MSG__
   <div class="section-title">Создать новый</div>
-  <form method="POST" action="/wg/">
+  <form method="POST">
+    <input type="hidden" name="action" value="generate">
     <label for="pass">Password</label>
     <input type="password" id="pass" name="pass" required placeholder="••••••••">
     <label for="name">Device name</label>
@@ -78,7 +79,8 @@ PAGE = """\
   </form>
   <hr class="divider">
   <div class="section-title">Отозвать устройство</div>
-  <form method="POST" action="/wg/revoke">
+  <form method="POST">
+    <input type="hidden" name="action" value="revoke">
     <label for="rpass">Password</label>
     <input type="password" id="rpass" name="pass" required placeholder="••••••••">
     <label for="rname">Device name</label>
@@ -120,15 +122,17 @@ class Handler(BaseHTTPRequestHandler):
         self._page()
 
     def do_POST(self):
-        if self.path == "/wg/revoke":
-            self._handle_revoke()
-        elif self.path.startswith("/wg"):
-            self._handle_generate()
-        else:
+        if not self.path.startswith("/wg"):
             self.send_error(404)
-
-    def _handle_generate(self):
+            return
         params = self._parse_post()
+        action = params.get("action", [""])[0]
+        if action == "revoke":
+            self._handle_revoke(params)
+        else:
+            self._handle_generate(params)
+
+    def _handle_generate(self, params):
         pwd = params.get("pass", [""])[0]
         name = params.get("name", [""])[0]
 
@@ -154,8 +158,7 @@ class Handler(BaseHTTPRequestHandler):
 
         self._file(cfg_path)
 
-    def _handle_revoke(self):
-        params = self._parse_post()
+    def _handle_revoke(self, params):
         pwd = params.get("pass", [""])[0]
         name = params.get("name", [""])[0]
 
