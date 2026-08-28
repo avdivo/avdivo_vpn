@@ -13,9 +13,10 @@
 import json
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 LOG = '/var/log/caddy/access.log'
+MINSK = timezone(timedelta(hours=3))
 DB = '/var/lib/wg-stats/wg-stats.db'
 
 
@@ -50,7 +51,7 @@ def main():
             req = d.get('request', {})
             host = (req.get('host') or 'unknown').lower()
             uri = req.get('uri', '') or ''
-            day = datetime.fromtimestamp(ts).strftime('%Y-%m-%d')
+            day = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(MINSK).strftime('%Y-%m-%d')
             c = counts.setdefault((day, host), [0, 0])
             c[0] += 1
             if uri.startswith('/wg'):

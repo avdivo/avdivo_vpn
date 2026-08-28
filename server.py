@@ -5,7 +5,7 @@ import re
 import sqlite3
 import subprocess
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from http.cookies import SimpleCookie
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -15,6 +15,16 @@ WG_CONF = "/etc/wireguard/wg0.conf"
 TEMPLATE = "client.conf.template"
 WG_IFACE = "wg0"
 STATS_DB = "/var/lib/wg-stats/wg-stats.db"
+
+# Часовой пояс пользователя (Минск, UTC+3, без перехода на летнее/зимнее).
+MINSK = timezone(timedelta(hours=3))
+
+
+def _minsk(ts=None):
+    """Текущее время или ts в часовом поясе Минска."""
+    if ts is None:
+        return datetime.now(timezone.utc).astimezone(MINSK)
+    return datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(MINSK)
 
 PASSWORD = os.environ.get("WG_PASSWORD", "")
 if not PASSWORD:
@@ -62,8 +72,8 @@ def human_bytes(n):
 
 
 def stats_window(period):
-    """Возвращает (start_ts, start_day) для периода."""
-    now = datetime.now()
+    """Возвращает (start_ts, start_day) для периода в часовом поясе Минска."""
+    now = _minsk()
     if period == "today":
         start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         return start.timestamp(), start.strftime("%Y-%m-%d")
@@ -84,8 +94,8 @@ def stats_db():
 
 
 def _day_range(day):
-    """(start_ts, end_ts) для конкретного дня (локальное время сервера)."""
-    start = datetime.strptime(day, "%Y-%m-%d")
+    """(start_ts, end_ts) для конкретного дня (часовой пояс Минска)."""
+    start = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=MINSK)
     end = start + timedelta(days=1)
     return start.timestamp(), end.timestamp()
 
@@ -215,14 +225,16 @@ def stats_points(period, peer, limit=200, day=None):
     db = stats_db()
     if db is None:
         return []
+    # Время показываем в часовом поясе Минска (UTC+3), без секунд.
+    time_expr = "strftime('%d.%m %H:%M', ts+10800, 'unixepoch')"
     if day:
         s, e = _day_range(day)
-        q = ("SELECT datetime(ts,'unixepoch','localtime'), name, rx_delta, tx_delta, online "
+        q = (f"SELECT {time_expr}, name, rx_delta, tx_delta, online "
              "FROM samples WHERE ts >= ? AND ts < ?")
         args = [s, e]
     else:
         start_ts, _ = stats_window(period)
-        q = ("SELECT datetime(ts,'unixepoch','localtime'), name, rx_delta, tx_delta, online "
+        q = (f"SELECT {time_expr}, name, rx_delta, tx_delta, online "
              "FROM samples WHERE ts >= ?")
         args = [start_ts]
     if peer and peer != "all":
@@ -278,26 +290,28 @@ def stats_http(period, day=None):
 
 
 def stats_series(period, peer, day=None):
-    """Динамика за период: ('hour'|'day', [(label, rx, tx, online, rec), ...]).
-    Для 'today' и конкретного дня — по часам, для длинных периодов — по дням."""
+    """Динамика за период: ('min'|'hour'|'day', [(label, rx, tx, online, rec), ...]).
+    - конкретный день: по часам;
+    - сегодня: каждые 5 минут;
+    - 7/30/всё дней: по дням.
+    Время всегда в часовом поясе Минска (UTC+3)."""
     db = stats_db()
     if db is None:
         return "day", []
     if day:
         s, e = _day_range(day)
-        q = ("SELECT strftime('%H:00', ts, 'unixepoch', 'localtime'), SUM(rx_delta), SUM(tx_delta), "
+        q = ("SELECT strftime('%H:00', ts+10800, 'unixepoch'), SUM(rx_delta), SUM(tx_delta), "
              "SUM(online), SUM(reconnects) FROM samples WHERE ts >= ? AND ts < ?")
         args = [s, e]
         kind = "hour"
     elif period == "today":
         start_ts, _ = stats_window(period)
-        q = ("SELECT strftime('%H:00', ts, 'unixepoch', 'localtime'), SUM(rx_delta), SUM(tx_delta), "
-             "SUM(online), SUM(reconnects) FROM samples WHERE ts >= ?")
+        q = ("SELECT ts, rx_delta, tx_delta, online, reconnects FROM samples WHERE ts >= ?")
         args = [start_ts]
-        kind = "hour"
+        kind = "min"
     else:
         start_ts, _ = stats_window(period)
-        q = ("SELECT strftime('%Y-%m-%d', ts, 'unixepoch', 'localtime'), SUM(rx_delta), SUM(tx_delta), "
+        q = ("SELECT strftime('%d.%m', ts+10800, 'unixepoch'), SUM(rx_delta), SUM(tx_delta), "
              "SUM(online), SUM(reconnects) FROM samples WHERE ts >= ?")
         args = [start_ts]
         kind = "day"
@@ -311,6 +325,10 @@ def stats_series(period, peer, day=None):
         return kind, []
     finally:
         db.close()
+    if kind == "min":
+        # Для точек по 5 минут label = HH:MM в Минске.
+        rows = [(datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(MINSK).strftime("%H:%M"),
+                 rx, tx, online, rec) for (ts, rx, tx, online, rec) in rows]
     return kind, rows
 
 
@@ -326,7 +344,7 @@ def svg_bars(title, labels, values, color):
     bw = max(2, min(48, (680 - pad * 2) // n))
     inner = n * bw
     width = max(680, inner + pad * 2)
-    h, top, gap = 120, 14, 16
+    h, top, gap = 80, 10, 12
     plot = h - top - gap
     bars = []
     for i, v in enumerate(values):
@@ -338,13 +356,60 @@ def svg_bars(title, labels, values, color):
         bars.append(f'<rect x="{x}" y="{y}" width="{max(1, bw - 1)}" height="{bh}" rx="1" fill="{color}"/>')
     step = max(1, n // 10)
     lab = "".join(
-        f'<text x="{pad + i * bw + bw / 2}" y="{h - 3}" font-size="9" fill="#64748b" text-anchor="middle">{labels[i]}</text>'
+        f'<text x="{pad + i * bw + bw / 2}" y="{h - 2}" font-size="9" fill="#64748b" text-anchor="middle">{labels[i]}</text>'
         for i in range(0, n, step)
     )
     return (
-        f'<div style="background:#1e293b;border-radius:.75rem;padding:1rem 1rem .4rem">'
-        f'<div style="font-size:.9rem;color:#cbd5e1;margin-bottom:.5rem">{title}</div>'
-        f'<svg viewBox="0 0 {width} {h}" width="100%" style="max-width:680px">{bars}{lab}</svg></div>'
+        f'<div class="chart-box">'
+        f'<div class="chart-title">{title}</div>'
+        f'<svg viewBox="0 0 {width} {h}" width="100%">{bars}{lab}</svg></div>'
+    )
+
+
+def svg_lines(title, labels, series, colors):
+    """SVG-линейный график. series=[(name, [values])]."""
+    if not labels or not series:
+        return ""
+    n = len(labels)
+    if n == 0:
+        return ""
+    pad = 8
+    width = 680
+    h, top, gap = 100, 12, 20
+    plot_h = h - top - gap
+    all_vals = [v for _, vals in series for v in vals]
+    max_val = max(all_vals) if all_vals else 1
+    max_val = max(1, max_val)
+
+    def x(i):
+        return pad + (i * (width - pad * 2) // (n - 1)) if n > 1 else width // 2
+
+    def y(v):
+        return top + round(plot_h - (v / max_val) * plot_h)
+
+    paths = []
+    for (_, vals), color in zip(series, colors):
+        d = "M" + " ".join(f"{x(i)},{y(v)}" for i, v in enumerate(vals))
+        paths.append(f'<path d="{d}" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>')
+        for i, v in enumerate(vals):
+            if v > 0:
+                paths.append(f'<circle cx="{x(i)}" cy="{y(v)}" r="1.5" fill="{color}"/>')
+
+    step = max(1, n // 10)
+    lab = "".join(
+        f'<text x="{x(i)}" y="{h - 3}" font-size="9" fill="#64748b" text-anchor="middle">{labels[i]}</text>'
+        for i in range(0, n, step)
+    )
+    legend = "".join(
+        f'<span style="display:inline-flex;align-items:center;gap:.35rem;margin-right:1rem;font-size:.8rem;color:#94a3b8">'
+        f'<span style="width:10px;height:3px;border-radius:2px;background:{color}"></span>{name}</span>'
+        for (name, _), color in zip(series, colors)
+    )
+    return (
+        f'<div class="chart-box">'
+        f'<div class="chart-title">{title}</div>'
+        f'<svg viewBox="0 0 {width} {h}" width="100%">{paths}{lab}</svg>'
+        f'<div style="margin-top:.35rem">{legend}</div></div>'
     )
 
 
@@ -505,10 +570,15 @@ STATS_HTML = """\
   .charts{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.5rem}
   .filters{background:#1e293b;border-radius:.75rem;padding:1.25rem;margin-bottom:1.5rem;display:grid;grid-template-columns:1fr 1fr 1fr;gap:1rem;align-items:end}
   .filters label{display:block;font-size:.8rem;font-weight:500;margin-bottom:.35rem;color:#cbd5e1}
-  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:1.5rem}
-  .card{background:#1e293b;border-radius:.75rem;padding:1rem 1.25rem}
-  .card .k{font-size:.75rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.03em}
-  .card .v{font-size:1.3rem;font-weight:600;margin-top:.35rem;color:#86efac}
+  .cards{display:grid;grid-template-columns:repeat(2,1fr);gap:.75rem;margin-bottom:1rem}
+  @media(max-width:360px){.cards{grid-template-columns:1fr}}
+  .card{background:#1e293b;border-radius:.75rem;padding:.75rem 1rem}
+  .card .k{font-size:.7rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.03em}
+  .card .v{font-size:1.1rem;font-weight:600;margin-top:.25rem;color:#86efac}
+  .chart-box{background:#1e293b;border-radius:.75rem;padding:.75rem 1rem .5rem;margin-bottom:.5rem}
+  .chart-title{font-size:.85rem;color:#cbd5e1;margin-bottom:.35rem}
+  .charts-toggle{display:inline-block;margin-bottom:1rem;color:#818cf8;font-weight:500;cursor:pointer;text-decoration:none;transition:color .15s}
+  .charts-toggle:hover{color:#a5b4fc}
   table{width:100%;border-collapse:collapse;margin-top:1rem;background:#1e293b;border-radius:.75rem;overflow:hidden}
   th,td{text-align:left;padding:.7rem .9rem;border-bottom:1px solid #334155;font-size:.9rem}
   th{color:#94a3b8;font-weight:500;font-size:.8rem;text-transform:uppercase;background:#1e293b}
@@ -535,6 +605,7 @@ STATS_HTML = """\
   </div>
   <form method="POST" action="/wg" style="margin:0"><input type="hidden" name="action" value="logout"><button class="btn-primary btn-sm" type="submit">Выйти</button></form>
 </div>
+__CARDS__
 <form method="GET" action="/wg/stats">
 <div class="filters">
   <div>
@@ -551,12 +622,20 @@ STATS_HTML = """\
   </div>
 </div>
 </form>
-__CARDS__
-__CHARTS__
+<a class="charts-toggle" id="charts-btn" onclick="toggleCharts()">Показать графики</a>
+<div id="charts" style="display:none">__CHARTS__</div>
 __TABLE__
 __HTTP__
 __NOTE__
 </div>
+<script>
+function toggleCharts(){
+  var e = document.getElementById('charts');
+  var b = document.getElementById('charts-btn');
+  e.style.display = (e.style.display === 'none') ? 'grid' : 'none';
+  b.textContent = (e.style.display === 'none') ? 'Показать графики' : 'Скрыть графики';
+}
+</script>
 </body>
 </html>"""
 
@@ -685,7 +764,7 @@ class Handler(BaseHTTPRequestHandler):
         if peer != "all":
             bread.append(f'<a class="link" href="{stat_url(peer="all", view="peers")}">{peer_names.get(peer, peer)}</a>')
         if day:
-            bread.append(f'<span>{day}</span>')
+            bread.append(f'<span>{day[8:]}.{day[5:7]}.{day[:4]}</span>')
         bread_html = '<div class="crumbs">' + ' <span style="color:#334155">›</span> '.join(bread) + '</div>'
 
         rx, tx, active, rec = stats_total(period, peer, day)
@@ -742,7 +821,8 @@ class Handler(BaseHTTPRequestHandler):
                         '<th>Активность</th><th>Переподключ.</th></tr>')
                 body_parts = []
                 for d, pkey, name, rx, tx, act, rec in rows:
-                    day_link = f'<a class="link" href="{stat_url(peer=pkey, view="points", day=d)}">{d}</a>'
+                    d_show = f"{d[8:]}.{d[5:7]}.{d[:4]}"
+                    day_link = f'<a class="link" href="{stat_url(peer=pkey, view="points", day=d)}">{d_show}</a>'
                     dev_cell = name
                     if peer == "all":
                         dev_cell = f'<a class="link" href="{stat_url(peer=pkey, view="points")}">{name}</a>'
@@ -766,7 +846,7 @@ class Handler(BaseHTTPRequestHandler):
                     for t, name, rx, tx, on in rows
                 )
                 table = bread_html + f"<table>{head}{body}</table>"
-                day_note = f" за день {day}" if day else ""
+                day_note = f" за {day[8:]}.{day[5:7]}.{day[:4]}" if day else ""
                 note = f'<div class="note">Точки (каждая — 5 минут){day_note}. Показаны последние 200.</div>'
             else:
                 table = '<div class="empty">Нет данных за выбранный период.</div>'
@@ -775,18 +855,15 @@ class Handler(BaseHTTPRequestHandler):
             kind, series = stats_series(period, peer, day)
             if series:
                 labels = [s[0] for s in series]
-                if kind == "day":
-                    labels = [l[5:] for l in labels]
                 tx_mb = [round(s[2] / 1048576, 1) for s in series]
                 rx_mb = [round(s[1] / 1048576, 1) for s in series]
                 rec = [s[4] for s in series]
                 on = [s[3] for s in series]
                 charts = (
                     '<div class="charts">' +
-                    svg_bars('Скачал, МБ', labels, tx_mb, '#34d399') +
-                    svg_bars('Отдал, МБ', labels, rx_mb, '#818cf8') +
+                    svg_lines('Трафик, МБ', labels, [('Скачал', tx_mb), ('Отдал', rx_mb)], ['#34d399', '#818cf8']) +
+                    svg_bars('Активность', labels, on, '#fbbf24') +
                     svg_bars('Переподключения', labels, rec, '#f472b6') +
-                    svg_bars('Активность (интервалов по 5 мин)', labels, on, '#fbbf24') +
                     '</div>'
                 )
 

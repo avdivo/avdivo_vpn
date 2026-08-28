@@ -15,9 +15,10 @@
 import os
 import sqlite3
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 DB = '/var/lib/wg-stats/wg-stats.db'
+MINSK = timezone(timedelta(hours=3))
 DEVICES_CSV = '/etc/wireguard-config/devices.csv'
 # Детальные точки (каждые 5 минут) храним несколько дней — за это время видно
 # кто как работает сегодня и вчера; дальше их место занимают дневные агрегаты
@@ -81,8 +82,9 @@ def main():
                'rx_sum INTEGER, tx_sum INTEGER, active INTEGER, reconnects INTEGER, '
                'PRIMARY KEY(day, peer))')
 
-    now = int(datetime.now().timestamp())
-    day = datetime.now().strftime('%Y-%m-%d')
+    now_minsk = datetime.now(timezone.utc).astimezone(MINSK)
+    now = int(now_minsk.timestamp())
+    day = now_minsk.strftime('%Y-%m-%d')
 
     devices = load_devices()
     transfer = parse_transfer(run('wg', 'show', 'wg0', 'transfer'))
