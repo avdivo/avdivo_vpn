@@ -81,10 +81,10 @@ def report(start_ts, end_ts, label):
         return
 
     print(f'Статистика WireGuard — {label}\n')
-    print(f'{"Устройство":<14}{"Скачано":>12}{"Отдано":>12}{"Активных":>10}{"Подключ.":>10}')
+    print(f'{"Устройство":<14}{"Скачал":>12}{"Отдал":>12}{"Активных":>10}{"Подключ.":>10}')
     print('-' * 58)
     for name, peer, rx, tx, active, reconnects in rows:
-        print(f'{name or "unknown":<14}{human(rx or 0):>12}{human(tx or 0):>12}'
+        print(f'{name or "unknown":<14}{human(tx or 0):>12}{human(rx or 0):>12}'
               f'{(active or 0):>10}{(reconnects or 0):>10}')
 
 

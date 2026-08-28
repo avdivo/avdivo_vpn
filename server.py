@@ -83,15 +83,28 @@ def stats_db():
     return sqlite3.connect(STATS_DB)
 
 
-def stats_peers(period, peer):
-    """Агрегат по пирам за период. Список (name, rx, tx, active, reconnects)."""
+def _day_range(day):
+    """(start_ts, end_ts) для конкретного дня (локальное время сервера)."""
+    start = datetime.strptime(day, "%Y-%m-%d")
+    end = start + timedelta(days=1)
+    return start.timestamp(), end.timestamp()
+
+
+def stats_peers(period, peer, day=None):
+    """Агрегат по пирам за период. Список (peer, name, rx, tx, active, reconnects)."""
     db = stats_db()
     if db is None:
         return []
-    start_ts, _ = stats_window(period)
-    q = ("SELECT peer, MAX(name), SUM(rx_delta), SUM(tx_delta), SUM(online), SUM(reconnects) "
-         "FROM samples WHERE ts >= ?")
-    args = [start_ts]
+    if day:
+        s, e = _day_range(day)
+        q = ("SELECT peer, MAX(name), SUM(rx_delta), SUM(tx_delta), SUM(online), SUM(reconnects) "
+             "FROM samples WHERE ts >= ? AND ts < ?")
+        args = [s, e]
+    else:
+        start_ts, _ = stats_window(period)
+        q = ("SELECT peer, MAX(name), SUM(rx_delta), SUM(tx_delta), SUM(online), SUM(reconnects) "
+             "FROM samples WHERE ts >= ?")
+        args = [start_ts]
     if peer and peer != "all":
         q += " AND peer = ?"
         args.append(peer)
@@ -103,18 +116,60 @@ def stats_peers(period, peer):
     finally:
         db.close()
     dev = {d["pubkey"]: d["name"] for d in read_devices()}
-    return [(dev.get(p, n or "unknown"), rx, tx, act, rec) for p, n, rx, tx, act, rec in rows]
+    return [(p, dev.get(p, n or "unknown"), rx, tx, act, rec) for p, n, rx, tx, act, rec in rows]
 
 
-def stats_total(period, peer):
+def stats_total_intervals(period, day=None):
+    """Сколько всего 5-минутных точек снято за период (для расчёта % времени)."""
+    db = stats_db()
+    if db is None:
+        return 0
+    if day:
+        s, e = _day_range(day)
+        try:
+            return db.execute("SELECT COUNT(DISTINCT ts) FROM samples WHERE ts >= ? AND ts < ?", (s, e)).fetchone()[0]
+        except sqlite3.Error:
+            return 0
+        finally:
+            db.close()
+    start_ts, _ = stats_window(period)
+    try:
+        return db.execute("SELECT COUNT(DISTINCT ts) FROM samples WHERE ts >= ?", (start_ts,)).fetchone()[0]
+    except sqlite3.Error:
+        return 0
+    finally:
+        db.close()
+
+
+def stats_live():
+    """Текущее состояние пиров: pubkey -> последний handshake (unix ts)."""
+    db = stats_db()
+    if db is None:
+        return {}
+    try:
+        rows = db.execute("SELECT peer, last_handshake FROM peers").fetchall()
+    except sqlite3.Error:
+        return {}
+    finally:
+        db.close()
+    return {p: h for p, h in rows}
+
+
+def stats_total(period, peer, day=None):
     """Итого за период по всем выбранным пирам."""
     db = stats_db()
     if db is None:
         return (0, 0, 0, 0)
-    start_ts, _ = stats_window(period)
-    q = ("SELECT COALESCE(SUM(rx_delta),0), COALESCE(SUM(tx_delta),0), "
-         "COALESCE(SUM(online),0), COALESCE(SUM(reconnects),0) FROM samples WHERE ts >= ?")
-    args = [start_ts]
+    if day:
+        s, e = _day_range(day)
+        q = ("SELECT COALESCE(SUM(rx_delta),0), COALESCE(SUM(tx_delta),0), "
+             "COALESCE(SUM(online),0), COALESCE(SUM(reconnects),0) FROM samples WHERE ts >= ? AND ts < ?")
+        args = [s, e]
+    else:
+        start_ts, _ = stats_window(period)
+        q = ("SELECT COALESCE(SUM(rx_delta),0), COALESCE(SUM(tx_delta),0), "
+             "COALESCE(SUM(online),0), COALESCE(SUM(reconnects),0) FROM samples WHERE ts >= ?")
+        args = [start_ts]
     if peer and peer != "all":
         q += " AND peer = ?"
         args.append(peer)
@@ -127,15 +182,20 @@ def stats_total(period, peer):
     return tuple(row or (0, 0, 0, 0))
 
 
-def stats_days(period, peer):
-    """Дневные агрегаты: (day, name, rx, tx, active, reconnects)."""
+def stats_days(period, peer, day=None):
+    """Дневные агрегаты: (day, peer, name, rx, tx, active, reconnects)."""
     db = stats_db()
     if db is None:
         return []
-    _, start_day = stats_window(period)
-    q = ("SELECT day, peer, MAX(name), SUM(rx_sum), SUM(tx_sum), SUM(active), SUM(reconnects) "
-         "FROM daily WHERE day >= ?")
-    args = [start_day]
+    if day:
+        q = ("SELECT day, peer, MAX(name), SUM(rx_sum), SUM(tx_sum), SUM(active), SUM(reconnects) "
+             "FROM daily WHERE day = ?")
+        args = [day]
+    else:
+        _, start_day = stats_window(period)
+        q = ("SELECT day, peer, MAX(name), SUM(rx_sum), SUM(tx_sum), SUM(active), SUM(reconnects) "
+             "FROM daily WHERE day >= ?")
+        args = [start_day]
     if peer and peer != "all":
         q += " AND peer = ?"
         args.append(peer)
@@ -147,18 +207,24 @@ def stats_days(period, peer):
     finally:
         db.close()
     dev = {d["pubkey"]: d["name"] for d in read_devices()}
-    return [(day, dev.get(p, n or "unknown"), rx, tx, act, rec) for day, p, n, rx, tx, act, rec in rows]
+    return [(day, p, dev.get(p, n or "unknown"), rx, tx, act, rec) for day, p, n, rx, tx, act, rec in rows]
 
 
-def stats_points(period, peer, limit=200):
+def stats_points(period, peer, limit=200, day=None):
     """Детальные точки (последние limit). (time, name, rx, tx, online)."""
     db = stats_db()
     if db is None:
         return []
-    start_ts, _ = stats_window(period)
-    q = ("SELECT datetime(ts,'unixepoch','localtime'), name, rx_delta, tx_delta, online "
-         "FROM samples WHERE ts >= ?")
-    args = [start_ts]
+    if day:
+        s, e = _day_range(day)
+        q = ("SELECT datetime(ts,'unixepoch','localtime'), name, rx_delta, tx_delta, online "
+             "FROM samples WHERE ts >= ? AND ts < ?")
+        args = [s, e]
+    else:
+        start_ts, _ = stats_window(period)
+        q = ("SELECT datetime(ts,'unixepoch','localtime'), name, rx_delta, tx_delta, online "
+             "FROM samples WHERE ts >= ?")
+        args = [start_ts]
     if peer and peer != "all":
         q += " AND peer = ?"
         args.append(peer)
@@ -188,16 +254,22 @@ def stats_peer_options():
     return [(p, dev.get(p, n or "unknown")) for p, n in rows]
 
 
-def stats_http(period):
+def stats_http(period, day=None):
     """HTTP-запросы к сайтам за период: (host, requests, wg_requests)."""
     db = stats_db()
     if db is None:
         return []
-    _, start_day = stats_window(period)
+    if day:
+        q = ("SELECT host, SUM(requests), SUM(wg_requests) FROM http_daily "
+             "WHERE day = ? GROUP BY host ORDER BY SUM(requests) DESC")
+        args = [day]
+    else:
+        _, start_day = stats_window(period)
+        q = ("SELECT host, SUM(requests), SUM(wg_requests) FROM http_daily "
+             "WHERE day >= ? GROUP BY host ORDER BY SUM(requests) DESC")
+        args = [start_day]
     try:
-        rows = db.execute(
-            "SELECT host, SUM(requests), SUM(wg_requests) FROM http_daily "
-            "WHERE day >= ? GROUP BY host ORDER BY SUM(requests) DESC", (start_day,)).fetchall()
+        rows = db.execute(q, args).fetchall()
     except sqlite3.Error:
         return []
     finally:
@@ -368,6 +440,7 @@ STATS_HTML = """\
   .muted{color:#64748b;font-size:.85rem}
   .badge-on{background:#14532d;color:#86efac}
   .badge-off{background:#1e3a8a;color:#93c5fd}
+  .badge-dead{background:#334155;color:#94a3b8}
   .badge{padding:.15rem .5rem;border-radius:999px;font-size:.75rem;font-weight:600}
   .empty{background:#1e293b;border-radius:.75rem;padding:2rem;text-align:center;color:#94a3b8}
   .center{max-width:900px;margin:0 auto}
@@ -497,6 +570,7 @@ class Handler(BaseHTTPRequestHandler):
         period = q.get("period", ["today"])[0]
         peer = q.get("peer", ["all"])[0]
         view = q.get("view", ["peers"])[0]
+        day = q.get("day", [None])[0]
         if period not in ("today", "week", "month", "all"):
             period = "today"
         if view not in ("peers", "days", "points"):
@@ -511,7 +585,13 @@ class Handler(BaseHTTPRequestHandler):
                 for k, v in items
             )
 
+        def stat_url(**overrides):
+            params = {"period": period, "peer": peer, "view": view}
+            params.update(overrides)
+            return "/wg/stats?" + urlencode(params)
+
         peer_opts = [("all", "Все устройства")] + [(p, n) for p, n in stats_peer_options()]
+        peer_names = dict(peer_opts)
 
         html = STATS_HTML
         html = html.replace("__PERIOD_OPTS__", opts(period, period_names.items()))
@@ -521,59 +601,103 @@ class Handler(BaseHTTPRequestHandler):
         cards = ""
         table = ""
         note = ""
+        http_section = ""
 
-        if peer == "all":
+        # Хлебные крошки: Все устройства › Имя › день
+        bread = ['<a class="link" href="/wg/stats?period=' + period + '&view=peers">Все устройства</a>']
+        if peer != "all":
+            bread.append(f'<a class="link" href="{stat_url(peer="all", view="peers")}">{peer_names.get(peer, peer)}</a>')
+        if day:
+            bread.append(f'<span class="muted">{day}</span>')
+        bread_html = f'<div class="muted" style="margin-bottom:.75rem">{ " › ".join(bread) }</div>'
+
+        if peer == "all" and not day:
             rx, tx, active, rec = stats_total(period, peer)
             cards = (
-                CARD_TPL.format(key="Скачано всего", value=human_bytes(rx)) +
-                CARD_TPL.format(key="Отдано всего", value=human_bytes(tx)) +
+                CARD_TPL.format(key="Скачано всего", value=human_bytes(tx)) +
+                CARD_TPL.format(key="Отдано всего", value=human_bytes(rx)) +
                 CARD_TPL.format(key="Активных интервалов", value=f"{active}") +
                 CARD_TPL.format(key="Переподключений", value=f"{rec}")
             )
 
+        now = datetime.now().timestamp()
+        live = stats_live()
+
+        def status_html(peer_key):
+            h = live.get(peer_key)
+            if not h:
+                return '<span class="muted">—</span>'
+            diff = now - h
+            if diff <= 180:
+                return '<span class="badge badge-on">онлайн</span>'
+            if diff < 3600:
+                return f'<span class="muted">оффлайн · {int(diff // 60)} мин назад</span>'
+            if diff < 86400:
+                return f'<span class="muted">оффлайн · {int(diff // 3600)} ч назад</span>'
+            return f'<span class="muted">оффлайн · {int(diff // 86400)} дн назад</span>'
+
         if view == "peers":
-            rows = stats_peers(period, peer)
+            rows = stats_peers(period, peer, day)
+            total_intervals = stats_total_intervals(period, day)
             if rows:
-                head = '<tr><th>Устройство</th><th>Скачано</th><th>Отдано</th><th>Активных</th><th>Переподключ.</th></tr>'
-                body = "".join(
-                    f'<tr><td>{name}</td><td>{human_bytes(rx)}</td><td>{human_bytes(tx)}</td>'
-                    f'<td>{act}</td><td>{rec}</td></tr>'
-                    for name, rx, tx, act, rec in rows
-                )
-                table = f"<table>{head}{body}</table>"
+                head = ('<tr><th>Устройство</th><th>Скачал</th><th>Отдал</th>'
+                        '<th>Активность</th><th>Переподключ.</th><th>Статус</th></tr>')
+                body_parts = []
+                for pkey, name, rx, tx, act, rec in rows:
+                    dead = (rx + tx) == 0 and act == 0
+                    dead_tag = ' <span class="badge badge-dead">нет трафика</span>' if dead else ""
+                    pct = f" ({act * 100 // total_intervals}%)" if total_intervals else ""
+                    cell_style = ' style="opacity:.55"' if dead else ""
+                    body_parts.append(
+                        f'<tr{cell_style}><td>'
+                        f'<a class="link" href="{stat_url(peer=pkey, view="days")}">{name}</a>{dead_tag}</td>'
+                        f'<td>{human_bytes(tx)}</td><td>{human_bytes(rx)}</td>'
+                        f'<td title="Из {total_intervals} интервалов по 5 минут">{act}{pct}</td>'
+                        f'<td>{rec}</td><td>{status_html(pkey)}</td></tr>'
+                    )
+                table = bread_html + f"<table>{head}{''.join(body_parts)}</table>"
+                note = '<div class="note">Клик по устройству — его отчёт по дням. «Скачал/Отдал» — с точки зрения устройства.</div>'
             else:
                 table = '<div class="empty">Нет данных за выбранный период.</div>'
         elif view == "days":
-            rows = stats_days(period, peer)
+            rows = stats_days(period, peer, day)
             if rows:
-                head = '<tr><th>День</th><th>Устройство</th><th>Скачано</th><th>Отдано</th><th>Активных</th><th>Переподключ.</th></tr>'
-                body = "".join(
-                    f'<tr><td>{day}</td><td>{name}</td><td>{human_bytes(rx)}</td><td>{human_bytes(tx)}</td>'
-                    f'<td>{act}</td><td>{rec}</td></tr>'
-                    for day, name, rx, tx, act, rec in rows
-                )
-                table = f"<table>{head}{body}</table>"
+                head = ('<tr><th>День</th><th>Устройство</th><th>Скачал</th><th>Отдал</th>'
+                        '<th>Активность</th><th>Переподключ.</th></tr>')
+                body_parts = []
+                for d, pkey, name, rx, tx, act, rec in rows:
+                    day_link = f'<a class="link" href="{stat_url(peer=pkey, view="points", day=d)}">{d}</a>'
+                    dev_cell = name
+                    if peer == "all":
+                        dev_cell = f'<a class="link" href="{stat_url(peer=pkey, view="days")}">{name}</a>'
+                    body_parts.append(
+                        f'<tr><td>{day_link}</td><td>{dev_cell}</td>'
+                        f'<td>{human_bytes(tx)}</td><td>{human_bytes(rx)}</td>'
+                        f'<td>{act}</td><td>{rec}</td></tr>'
+                    )
+                table = bread_html + f"<table>{head}{''.join(body_parts)}</table>"
+                note = '<div class="note">Клик по дню — детальные точки за этот день.</div>'
             else:
                 table = '<div class="empty">Нет данных за выбранный период.</div>'
         else:
-            rows = stats_points(period, peer)
+            rows = stats_points(period, peer, day=day)
             if rows:
-                head = '<tr><th>Время</th><th>Устройство</th><th>Скачано</th><th>Отдано</th><th>Статус</th></tr>'
+                head = '<tr><th>Время</th><th>Устройство</th><th>Скачал</th><th>Отдал</th><th>Статус</th></tr>'
                 body = "".join(
-                    f'<tr><td class="muted">{t}</td><td>{name}</td><td>{human_bytes(rx)}</td>'
-                    f'<td>{human_bytes(tx)}</td><td><span class="badge {"badge-on" if on else "badge-off"}">'
+                    f'<tr><td class="muted">{t}</td><td>{name}</td><td>{human_bytes(tx)}</td>'
+                    f'<td>{human_bytes(rx)}</td><td><span class="badge {"badge-on" if on else "badge-off"}">'
                     f'{"активен" if on else "в сети"}</span></td></tr>'
                     for t, name, rx, tx, on in rows
                 )
-                table = f"<table>{head}{body}</table>"
-                note = '<div class="note">Показаны последние 200 точек (каждая — 5 минут).</div>'
+                table = bread_html + f"<table>{head}{body}</table>"
+                day_note = f" за день {day}" if day else ""
+                note = f'<div class="note">Точки (каждая — 5 минут){day_note}. Показаны последние 200.</div>'
             else:
                 table = '<div class="empty">Нет данных за выбранный период.</div>'
 
         html = html.replace("__CARDS__", cards).replace("__TABLE__", table).replace("__NOTE__", note)
 
-        http_rows = stats_http(period)
-        http_section = ""
+        http_rows = stats_http(period, day)
         if http_rows:
             total = sum(r[1] for r in http_rows)
             wg_total = sum(r[2] for r in http_rows)
