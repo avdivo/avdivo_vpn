@@ -575,10 +575,8 @@ STATS_HTML = """\
   .card{background:#1e293b;border-radius:.75rem;padding:.75rem 1rem}
   .card .k{font-size:.7rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.03em}
   .card .v{font-size:1.1rem;font-weight:600;margin-top:.25rem;color:#86efac}
-  .chart-box{background:#1e293b;border-radius:.75rem;padding:.75rem 1rem .5rem;margin-bottom:.5rem}
+  .chart-box{background:#1e293b;border-radius:.75rem;padding:.75rem 1rem .5rem;margin-bottom:1rem}
   .chart-title{font-size:.85rem;color:#cbd5e1;margin-bottom:.35rem}
-  .charts-toggle{display:inline-block;margin-bottom:1rem;color:#818cf8;font-weight:500;cursor:pointer;text-decoration:none;transition:color .15s}
-  .charts-toggle:hover{color:#a5b4fc}
   table{width:100%;border-collapse:collapse;margin-top:1rem;background:#1e293b;border-radius:.75rem;overflow:hidden}
   th,td{text-align:left;padding:.7rem .9rem;border-bottom:1px solid #334155;font-size:.9rem}
   th{color:#94a3b8;font-weight:500;font-size:.8rem;text-transform:uppercase;background:#1e293b}
@@ -622,20 +620,11 @@ __CARDS__
   </div>
 </div>
 </form>
-<a class="charts-toggle" id="charts-btn" onclick="toggleCharts()">Показать графики</a>
-<div id="charts" style="display:none">__CHARTS__</div>
+<div id="charts">__CHARTS__</div>
 __TABLE__
 __HTTP__
 __NOTE__
 </div>
-<script>
-function toggleCharts(){
-  var e = document.getElementById('charts');
-  var b = document.getElementById('charts-btn');
-  e.style.display = (e.style.display === 'none') ? 'block' : 'none';
-  b.textContent = (e.style.display === 'none') ? 'Показать графики' : 'Скрыть графики';
-}
-</script>
 </body>
 </html>"""
 
