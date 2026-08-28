@@ -2,17 +2,19 @@ import csv
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
-from datetime import date
+from datetime import date, datetime, timedelta
 from http.cookies import SimpleCookie
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import parse_qs, urlencode
+from urllib.parse import parse_qs, urlencode, urlparse
 
 WG_DIR = "/etc/wireguard-config"
 WG_CONF = "/etc/wireguard/wg0.conf"
 TEMPLATE = "client.conf.template"
 WG_IFACE = "wg0"
+STATS_DB = "/var/lib/wg-stats/wg-stats.db"
 
 PASSWORD = os.environ.get("WG_PASSWORD", "")
 if not PASSWORD:
@@ -45,6 +47,145 @@ def peer_add(pubkey, ip):
 
 def peer_remove(pubkey):
     subprocess.run(["wg", "set", WG_IFACE, "peer", pubkey, "remove"], check=True)
+
+
+# ---- Статистика (wg-stats.py, SQLite) ----
+
+def human_bytes(n):
+    """Байты -> человекочитаемый размер."""
+    n = max(0, n or 0)
+    for unit in ("Б", "КБ", "МБ", "ГБ"):
+        if n < 1024:
+            return f"{n:.0f} {unit}" if unit == "Б" else f"{n:.2f} {unit}"
+        n /= 1024
+    return f"{n:.2f} ТБ"
+
+
+def stats_window(period):
+    """Возвращает (start_ts, start_day) для периода."""
+    now = datetime.now()
+    if period == "today":
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        return start.timestamp(), start.strftime("%Y-%m-%d")
+    if period == "week":
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=6)
+        return start.timestamp(), start.strftime("%Y-%m-%d")
+    if period == "month":
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=29)
+        return start.timestamp(), start.strftime("%Y-%m-%d")
+    return 0.0, "2000-01-01"  # all
+
+
+def stats_db():
+    """Открывает БД статистики; None, если её ещё нет."""
+    if not os.path.exists(STATS_DB):
+        return None
+    return sqlite3.connect(STATS_DB)
+
+
+def stats_peers(period, peer):
+    """Агрегат по пирам за период. Список (name, rx, tx, active, reconnects)."""
+    db = stats_db()
+    if db is None:
+        return []
+    start_ts, _ = stats_window(period)
+    q = ("SELECT peer, MAX(name), SUM(rx_delta), SUM(tx_delta), SUM(online), SUM(reconnects) "
+         "FROM samples WHERE ts >= ?")
+    args = [start_ts]
+    if peer and peer != "all":
+        q += " AND peer = ?"
+        args.append(peer)
+    q += " GROUP BY peer ORDER BY MAX(name)"
+    try:
+        rows = db.execute(q, args).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        db.close()
+    dev = {d["pubkey"]: d["name"] for d in read_devices()}
+    return [(dev.get(p, n or "unknown"), rx, tx, act, rec) for p, n, rx, tx, act, rec in rows]
+
+
+def stats_total(period, peer):
+    """Итого за период по всем выбранным пирам."""
+    db = stats_db()
+    if db is None:
+        return (0, 0, 0, 0)
+    start_ts, _ = stats_window(period)
+    q = ("SELECT COALESCE(SUM(rx_delta),0), COALESCE(SUM(tx_delta),0), "
+         "COALESCE(SUM(online),0), COALESCE(SUM(reconnects),0) FROM samples WHERE ts >= ?")
+    args = [start_ts]
+    if peer and peer != "all":
+        q += " AND peer = ?"
+        args.append(peer)
+    try:
+        row = db.execute(q, args).fetchone()
+    except sqlite3.Error:
+        return (0, 0, 0, 0)
+    finally:
+        db.close()
+    return tuple(row or (0, 0, 0, 0))
+
+
+def stats_days(period, peer):
+    """Дневные агрегаты: (day, name, rx, tx, active, reconnects)."""
+    db = stats_db()
+    if db is None:
+        return []
+    _, start_day = stats_window(period)
+    q = ("SELECT day, peer, MAX(name), SUM(rx_sum), SUM(tx_sum), SUM(active), SUM(reconnects) "
+         "FROM daily WHERE day >= ?")
+    args = [start_day]
+    if peer and peer != "all":
+        q += " AND peer = ?"
+        args.append(peer)
+    q += " GROUP BY day, peer ORDER BY day DESC, MAX(name)"
+    try:
+        rows = db.execute(q, args).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        db.close()
+    dev = {d["pubkey"]: d["name"] for d in read_devices()}
+    return [(day, dev.get(p, n or "unknown"), rx, tx, act, rec) for day, p, n, rx, tx, act, rec in rows]
+
+
+def stats_points(period, peer, limit=200):
+    """Детальные точки (последние limit). (time, name, rx, tx, online)."""
+    db = stats_db()
+    if db is None:
+        return []
+    start_ts, _ = stats_window(period)
+    q = ("SELECT datetime(ts,'unixepoch','localtime'), name, rx_delta, tx_delta, online "
+         "FROM samples WHERE ts >= ?")
+    args = [start_ts]
+    if peer and peer != "all":
+        q += " AND peer = ?"
+        args.append(peer)
+    q += " ORDER BY ts DESC LIMIT ?"
+    args.append(limit)
+    try:
+        rows = db.execute(q, args).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        db.close()
+    return rows
+
+
+def stats_peer_options():
+    """Варианты пиров для фильтра: (peer, name)."""
+    db = stats_db()
+    if db is None:
+        return []
+    try:
+        rows = db.execute("SELECT DISTINCT peer, MAX(name) FROM samples GROUP BY peer ORDER BY MAX(name)").fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        db.close()
+    dev = {d["pubkey"]: d["name"] for d in read_devices()}
+    return [(p, dev.get(p, n or "unknown")) for p, n in rows]
 
 
 LOGIN_HTML = """\
@@ -119,6 +260,10 @@ ADMIN_HTML = """\
   .add-section input{flex:1;margin-bottom:0}
   .add-section button{white-space:nowrap}
   a{color:#6366f1;text-decoration:none}
+  .nav{display:flex;gap:1.25rem;margin-top:.6rem}
+  .nav a{color:#94a3b8;font-size:.9rem;font-weight:500;padding-bottom:.2rem}
+  .nav a:hover{color:#e2e8f0}
+  .nav a.active{color:#6366f1;border-bottom:2px solid #6366f1}
   .logout{font-size:.85rem;color:#64748b}
   .center{max-width:900px;margin:0 auto}
   @media(max-width:640px){.add-section{flex-direction:column;align-items:stretch}}
@@ -127,7 +272,12 @@ ADMIN_HTML = """\
 <body>
 <div class="center">
 <div class="header">
-  <div><h2>avdivo VPN</h2><p class="logout">Управление устройствами</p></div>
+  <div><h2>avdivo VPN</h2><p class="logout">Управление устройствами</p>
+    <nav class="nav">
+      <a href="/wg" class="active">Устройства</a>
+      <a href="/wg/stats">Статистика</a>
+    </nav>
+  </div>
   <form method="POST" style="margin:0"><input type="hidden" name="action" value="logout"><button class="btn-sm btn-primary" type="submit">Выйти</button></form>
 </div>
 __MSG__
@@ -159,6 +309,89 @@ ROWS_TPL = """\
   <td><form method="POST" style="margin:0"><input type="hidden" name="action" value="toggle"><input type="hidden" name="name" value="{name}">{toggle_btn}</form></td>
   <td><form method="POST" style="margin:0" onsubmit="return confirm('Удалить устройство {name}?')"><input type="hidden" name="action" value="delete"><input type="hidden" name="name" value="{name}"><button class="btn-sm btn-danger" type="submit">Удалить</button></form></td>
 </tr>"""
+
+STATS_HTML = """\
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>avdivo VPN — статистика</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Oxygen,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:2rem 1rem}
+  h2{margin:0 0 .25rem;font-size:1.5rem;font-weight:600}
+  p{color:#94a3b8;margin:0 0 1.5rem;font-size:.9rem}
+  .header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1.5rem}
+  .nav{display:flex;gap:1.25rem;margin-top:.6rem}
+  .nav a{color:#94a3b8;font-size:.9rem;font-weight:500;padding-bottom:.2rem;text-decoration:none}
+  .nav a:hover{color:#e2e8f0}
+  .nav a.active{color:#6366f1;border-bottom:2px solid #6366f1}
+  .logout{font-size:.85rem;color:#64748b}
+  .btn-primary{background:#6366f1;color:#fff;border:none;border-radius:.5rem;padding:.6rem 1.2rem;font-size:.9rem;font-weight:600;cursor:pointer}
+  .btn-primary:hover{background:#4f46e5}
+  .btn-sm{padding:.4rem .8rem;font-size:.8rem}
+  select{width:100%;padding:.6rem .8rem;border:1px solid #334155;border-radius:.5rem;background:#0f172a;color:#e2e8f0;font-size:.9rem;outline:none}
+  .filters{background:#1e293b;border-radius:.75rem;padding:1.25rem;margin-bottom:1.5rem;display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:1rem;align-items:end}
+  .filters label{display:block;font-size:.8rem;font-weight:500;margin-bottom:.35rem;color:#cbd5e1}
+  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:1.5rem}
+  .card{background:#1e293b;border-radius:.75rem;padding:1rem 1.25rem}
+  .card .k{font-size:.75rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.03em}
+  .card .v{font-size:1.3rem;font-weight:600;margin-top:.35rem;color:#86efac}
+  table{width:100%;border-collapse:collapse;margin-top:1rem;background:#1e293b;border-radius:.75rem;overflow:hidden}
+  th,td{text-align:left;padding:.7rem .9rem;border-bottom:1px solid #334155;font-size:.9rem}
+  th{color:#94a3b8;font-weight:500;font-size:.8rem;text-transform:uppercase;background:#1e293b}
+  tr:last-child td{border-bottom:none}
+  .muted{color:#64748b;font-size:.85rem}
+  .badge-on{background:#14532d;color:#86efac}
+  .badge-off{background:#1e3a8a;color:#93c5fd}
+  .badge{padding:.15rem .5rem;border-radius:999px;font-size:.75rem;font-weight:600}
+  .empty{background:#1e293b;border-radius:.75rem;padding:2rem;text-align:center;color:#94a3b8}
+  .center{max-width:900px;margin:0 auto}
+  .note{color:#64748b;font-size:.8rem;margin-top:.75rem}
+  @media(max-width:700px){.filters{grid-template-columns:1fr}.cards{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+<div class="center">
+<div class="header">
+  <div><h2>avdivo VPN</h2><p class="logout">Статистика по устройствам</p>
+    <nav class="nav">
+      <a href="/wg">Устройства</a>
+      <a href="/wg/stats" class="active">Статистика</a>
+    </nav>
+  </div>
+  <form method="POST" action="/wg" style="margin:0"><input type="hidden" name="action" value="logout"><button class="btn-primary btn-sm" type="submit">Выйти</button></form>
+</div>
+<form method="GET" action="/wg/stats">
+<div class="filters">
+  <div>
+    <label>Период</label>
+    <select name="period">__PERIOD_OPTS__</select>
+  </div>
+  <div>
+    <label>Устройство</label>
+    <select name="peer">__PEER_OPTS__</select>
+  </div>
+  <div>
+    <label>Вид отчёта</label>
+    <select name="view">__VIEW_OPTS__</select>
+  </div>
+  <button class="btn-primary" type="submit">Показать</button>
+</div>
+</form>
+__CARDS__
+__TABLE__
+__NOTE__
+</div>
+</body>
+</html>"""
+
+CARD_TPL = """\
+<div class="card">
+  <div class="k">{key}</div>
+  <div class="v">{value}</div>
+</div>"""
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -233,7 +466,95 @@ class Handler(BaseHTTPRequestHandler):
         html = ADMIN_HTML.replace("__MSG__", extra_msg + self._get_msg()).replace("__ROWS__", "".join(rows))
         self._send_html(html)
 
+    def _render_stats(self):
+        q = parse_qs(urlparse(self.path).query)
+        period = q.get("period", ["today"])[0]
+        peer = q.get("peer", ["all"])[0]
+        view = q.get("view", ["peers"])[0]
+        if period not in ("today", "week", "month", "all"):
+            period = "today"
+        if view not in ("peers", "days", "points"):
+            view = "peers"
+
+        period_names = {"today": "Сегодня", "week": "7 дней", "month": "30 дней", "all": "Всё время"}
+        view_names = {"peers": "По устройствам", "days": "По дням", "points": "Детально (точки)"}
+
+        def opts(current, items):
+            return "".join(
+                f'<option value="{k}"{" selected" if k == current else ""}>{v}</option>'
+                for k, v in items
+            )
+
+        peer_opts = [("all", "Все устройства")] + [(p, n) for p, n in stats_peer_options()]
+
+        html = STATS_HTML
+        html = html.replace("__PERIOD_OPTS__", opts(period, period_names.items()))
+        html = html.replace("__VIEW_OPTS__", opts(view, view_names.items()))
+        html = html.replace("__PEER_OPTS__", opts(peer, peer_opts))
+
+        cards = ""
+        table = ""
+        note = ""
+
+        if peer == "all":
+            rx, tx, active, rec = stats_total(period, peer)
+            cards = (
+                CARD_TPL.format(key="Скачано всего", value=human_bytes(rx)) +
+                CARD_TPL.format(key="Отдано всего", value=human_bytes(tx)) +
+                CARD_TPL.format(key="Активных интервалов", value=f"{active}") +
+                CARD_TPL.format(key="Переподключений", value=f"{rec}")
+            )
+
+        if view == "peers":
+            rows = stats_peers(period, peer)
+            if rows:
+                head = '<tr><th>Устройство</th><th>Скачано</th><th>Отдано</th><th>Активных</th><th>Переподключ.</th></tr>'
+                body = "".join(
+                    f'<tr><td>{name}</td><td>{human_bytes(rx)}</td><td>{human_bytes(tx)}</td>'
+                    f'<td>{act}</td><td>{rec}</td></tr>'
+                    for name, rx, tx, act, rec in rows
+                )
+                table = f"<table>{head}{body}</table>"
+            else:
+                table = '<div class="empty">Нет данных за выбранный период.</div>'
+        elif view == "days":
+            rows = stats_days(period, peer)
+            if rows:
+                head = '<tr><th>День</th><th>Устройство</th><th>Скачано</th><th>Отдано</th><th>Активных</th><th>Переподключ.</th></tr>'
+                body = "".join(
+                    f'<tr><td>{day}</td><td>{name}</td><td>{human_bytes(rx)}</td><td>{human_bytes(tx)}</td>'
+                    f'<td>{act}</td><td>{rec}</td></tr>'
+                    for day, name, rx, tx, act, rec in rows
+                )
+                table = f"<table>{head}{body}</table>"
+            else:
+                table = '<div class="empty">Нет данных за выбранный период.</div>'
+        else:
+            rows = stats_points(period, peer)
+            if rows:
+                head = '<tr><th>Время</th><th>Устройство</th><th>Скачано</th><th>Отдано</th><th>Статус</th></tr>'
+                body = "".join(
+                    f'<tr><td class="muted">{t}</td><td>{name}</td><td>{human_bytes(rx)}</td>'
+                    f'<td>{human_bytes(tx)}</td><td><span class="badge {"badge-on" if on else "badge-off"}">'
+                    f'{"активен" if on else "в сети"}</span></td></tr>'
+                    for t, name, rx, tx, on in rows
+                )
+                table = f"<table>{head}{body}</table>"
+                note = '<div class="note">Показаны последние 200 точек (каждая — 5 минут).</div>'
+            else:
+                table = '<div class="empty">Нет данных за выбранный период.</div>'
+
+        html = html.replace("__CARDS__", cards).replace("__TABLE__", table).replace("__NOTE__", note)
+        self._send_html(html)
+
     def do_GET(self):
+        if self.path.startswith("/wg/stats"):
+            if not self._authed():
+                self._redirect("Требуется вход", err=True)
+                return
+            self._render_stats()
+            return
+
         if self.path.startswith("/wg/download"):
             from urllib.parse import urlparse, parse_qs as pqs
             name = pqs(urlparse(self.path).query).get("name", [None])[0]
