@@ -424,6 +424,8 @@ class Handler(BaseHTTPRequestHandler):
         c["avdivo_vpn"] = value
         c["avdivo_vpn"]["path"] = "/"
         c["avdivo_vpn"]["max-age"] = max_age
+        if max_age == 0:
+            c["avdivo_vpn"]["expires"] = "Thu, 01 Jan 1970 00:00:00 GMT"
         return c["avdivo_vpn"].OutputString()
 
     def _authed(self):
@@ -667,7 +669,8 @@ class Handler(BaseHTTPRequestHandler):
         if action == "logout":
             self.send_response(303)
             self.send_header("Set-Cookie", self._cookie("", 0))
-            self.send_header("Location", "/wg?msg=Выход+выполнен&err=0")
+            qs = urlencode({"msg": "Выход выполнен", "err": "0"})
+            self.send_header("Location", f"/wg?{qs}")
             self.end_headers()
             return
 
