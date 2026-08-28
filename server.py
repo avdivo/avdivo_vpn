@@ -277,6 +277,77 @@ def stats_http(period, day=None):
     return rows
 
 
+def stats_series(period, peer, day=None):
+    """Динамика за период: ('hour'|'day', [(label, rx, tx, online, rec), ...]).
+    Для 'today' и конкретного дня — по часам, для длинных периодов — по дням."""
+    db = stats_db()
+    if db is None:
+        return "day", []
+    if day:
+        s, e = _day_range(day)
+        q = ("SELECT strftime('%H:00', ts, 'unixepoch', 'localtime'), SUM(rx_delta), SUM(tx_delta), "
+             "SUM(online), SUM(reconnects) FROM samples WHERE ts >= ? AND ts < ?")
+        args = [s, e]
+        kind = "hour"
+    elif period == "today":
+        start_ts, _ = stats_window(period)
+        q = ("SELECT strftime('%H:00', ts, 'unixepoch', 'localtime'), SUM(rx_delta), SUM(tx_delta), "
+             "SUM(online), SUM(reconnects) FROM samples WHERE ts >= ?")
+        args = [start_ts]
+        kind = "hour"
+    else:
+        start_ts, _ = stats_window(period)
+        q = ("SELECT strftime('%Y-%m-%d', ts, 'unixepoch', 'localtime'), SUM(rx_delta), SUM(tx_delta), "
+             "SUM(online), SUM(reconnects) FROM samples WHERE ts >= ?")
+        args = [start_ts]
+        kind = "day"
+    if peer and peer != "all":
+        q += " AND peer = ?"
+        args.append(peer)
+    q += " GROUP BY 1 ORDER BY 1"
+    try:
+        rows = db.execute(q, args).fetchall()
+    except sqlite3.Error:
+        return kind, []
+    finally:
+        db.close()
+    return kind, rows
+
+
+def svg_bars(title, labels, values, color):
+    """Простая SVG-гистограмма без внешних библиотек."""
+    if not values:
+        return ""
+    n = len(values)
+    if n == 0:
+        return ""
+    max_val = max(values) or 1
+    pad = 8
+    bw = max(2, min(48, (680 - pad * 2) // n))
+    inner = n * bw
+    width = max(680, inner + pad * 2)
+    h, top, gap = 120, 14, 16
+    plot = h - top - gap
+    bars = []
+    for i, v in enumerate(values):
+        x = pad + i * bw
+        bh = round((v / max_val) * plot)
+        if 0 < v and bh < 1:
+            bh = 1
+        y = top + plot - bh
+        bars.append(f'<rect x="{x}" y="{y}" width="{max(1, bw - 1)}" height="{bh}" rx="1" fill="{color}"/>')
+    step = max(1, n // 10)
+    lab = "".join(
+        f'<text x="{pad + i * bw + bw / 2}" y="{h - 3}" font-size="9" fill="#64748b" text-anchor="middle">{labels[i]}</text>'
+        for i in range(0, n, step)
+    )
+    return (
+        f'<div style="background:#1e293b;border-radius:.75rem;padding:1rem 1rem .4rem">'
+        f'<div style="font-size:.9rem;color:#cbd5e1;margin-bottom:.5rem">{title}</div>'
+        f'<svg viewBox="0 0 {width} {h}" width="100%" style="max-width:680px">{bars}{lab}</svg></div>'
+    )
+
+
 LOGIN_HTML = """\
 <!DOCTYPE html>
 <html lang="ru">
@@ -426,8 +497,13 @@ STATS_HTML = """\
   .btn-primary{background:#6366f1;color:#fff;border:none;border-radius:.5rem;padding:.6rem 1.2rem;font-size:.9rem;font-weight:600;cursor:pointer}
   .btn-primary:hover{background:#4f46e5}
   .btn-sm{padding:.4rem .8rem;font-size:.8rem}
-  select{width:100%;padding:.6rem .8rem;border:1px solid #334155;border-radius:.5rem;background:#0f172a;color:#e2e8f0;font-size:.9rem;outline:none}
-  .filters{background:#1e293b;border-radius:.75rem;padding:1.25rem;margin-bottom:1.5rem;display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:1rem;align-items:end}
+  select{width:100%;padding:.6rem .8rem;border:1px solid #334155;border-radius:.5rem;background:#0f172a;color:#e2e8f0;font-size:.9rem;outline:none;cursor:pointer;transition:border-color .15s}
+  select:focus{border-color:#6366f1}
+  .link{color:#818cf8;text-decoration:none;font-weight:500;transition:color .15s}
+  .link:hover{color:#a5b4fc}
+  .crumbs{color:#94a3b8;font-size:.95rem;margin-bottom:.75rem}
+  .charts{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.5rem}
+  .filters{background:#1e293b;border-radius:.75rem;padding:1.25rem;margin-bottom:1.5rem;display:grid;grid-template-columns:1fr 1fr 1fr;gap:1rem;align-items:end}
   .filters label{display:block;font-size:.8rem;font-weight:500;margin-bottom:.35rem;color:#cbd5e1}
   .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:1.5rem}
   .card{background:#1e293b;border-radius:.75rem;padding:1rem 1.25rem}
@@ -463,20 +539,20 @@ STATS_HTML = """\
 <div class="filters">
   <div>
     <label>Период</label>
-    <select name="period">__PERIOD_OPTS__</select>
+    <select name="period" onchange="this.form.submit()">__PERIOD_OPTS__</select>
   </div>
   <div>
     <label>Устройство</label>
-    <select name="peer">__PEER_OPTS__</select>
+    <select name="peer" onchange="this.form.submit()">__PEER_OPTS__</select>
   </div>
   <div>
     <label>Вид отчёта</label>
-    <select name="view">__VIEW_OPTS__</select>
+    <select name="view" onchange="this.form.submit()">__VIEW_OPTS__</select>
   </div>
-  <button class="btn-primary" type="submit">Показать</button>
 </div>
 </form>
 __CARDS__
+__CHARTS__
 __TABLE__
 __HTTP__
 __NOTE__
@@ -602,23 +678,23 @@ class Handler(BaseHTTPRequestHandler):
         table = ""
         note = ""
         http_section = ""
+        charts = ""
 
         # Хлебные крошки: Все устройства › Имя › день
         bread = ['<a class="link" href="/wg/stats?period=' + period + '&view=peers">Все устройства</a>']
         if peer != "all":
             bread.append(f'<a class="link" href="{stat_url(peer="all", view="peers")}">{peer_names.get(peer, peer)}</a>')
         if day:
-            bread.append(f'<span class="muted">{day}</span>')
-        bread_html = f'<div class="muted" style="margin-bottom:.75rem">{ " › ".join(bread) }</div>'
+            bread.append(f'<span>{day}</span>')
+        bread_html = '<div class="crumbs">' + ' <span style="color:#334155">›</span> '.join(bread) + '</div>'
 
-        if peer == "all" and not day:
-            rx, tx, active, rec = stats_total(period, peer)
-            cards = (
-                CARD_TPL.format(key="Скачано всего", value=human_bytes(tx)) +
-                CARD_TPL.format(key="Отдано всего", value=human_bytes(rx)) +
-                CARD_TPL.format(key="Активных интервалов", value=f"{active}") +
-                CARD_TPL.format(key="Переподключений", value=f"{rec}")
-            )
+        rx, tx, active, rec = stats_total(period, peer, day)
+        cards = (
+            CARD_TPL.format(key="Скачано всего", value=human_bytes(tx)) +
+            CARD_TPL.format(key="Отдано всего", value=human_bytes(rx)) +
+            CARD_TPL.format(key="Активных интервалов", value=f"{active}") +
+            CARD_TPL.format(key="Переподключений", value=f"{rec}")
+        )
 
         now = datetime.now().timestamp()
         live = stats_live()
@@ -650,13 +726,13 @@ class Handler(BaseHTTPRequestHandler):
                     cell_style = ' style="opacity:.55"' if dead else ""
                     body_parts.append(
                         f'<tr{cell_style}><td>'
-                        f'<a class="link" href="{stat_url(peer=pkey, view="days")}">{name}</a>{dead_tag}</td>'
+                        f'<a class="link" href="{stat_url(peer=pkey, view="points")}">{name}</a>{dead_tag}</td>'
                         f'<td>{human_bytes(tx)}</td><td>{human_bytes(rx)}</td>'
                         f'<td title="Из {total_intervals} интервалов по 5 минут">{act}{pct}</td>'
                         f'<td>{rec}</td><td>{status_html(pkey)}</td></tr>'
                     )
                 table = bread_html + f"<table>{head}{''.join(body_parts)}</table>"
-                note = '<div class="note">Клик по устройству — его отчёт по дням. «Скачал/Отдал» — с точки зрения устройства.</div>'
+                note = '<div class="note">Клик по устройству — подробные подключения за каждые 5 минут.</div>'
             else:
                 table = '<div class="empty">Нет данных за выбранный период.</div>'
         elif view == "days":
@@ -669,7 +745,7 @@ class Handler(BaseHTTPRequestHandler):
                     day_link = f'<a class="link" href="{stat_url(peer=pkey, view="points", day=d)}">{d}</a>'
                     dev_cell = name
                     if peer == "all":
-                        dev_cell = f'<a class="link" href="{stat_url(peer=pkey, view="days")}">{name}</a>'
+                        dev_cell = f'<a class="link" href="{stat_url(peer=pkey, view="points")}">{name}</a>'
                     body_parts.append(
                         f'<tr><td>{day_link}</td><td>{dev_cell}</td>'
                         f'<td>{human_bytes(tx)}</td><td>{human_bytes(rx)}</td>'
@@ -695,7 +771,27 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 table = '<div class="empty">Нет данных за выбранный период.</div>'
 
-        html = html.replace("__CARDS__", cards).replace("__TABLE__", table).replace("__NOTE__", note)
+        if view in ("peers", "points"):
+            kind, series = stats_series(period, peer, day)
+            if series:
+                labels = [s[0] for s in series]
+                if kind == "day":
+                    labels = [l[5:] for l in labels]
+                tx_mb = [round(s[2] / 1048576, 1) for s in series]
+                rx_mb = [round(s[1] / 1048576, 1) for s in series]
+                rec = [s[4] for s in series]
+                on = [s[3] for s in series]
+                charts = (
+                    '<div class="charts">' +
+                    svg_bars('Скачал, МБ', labels, tx_mb, '#34d399') +
+                    svg_bars('Отдал, МБ', labels, rx_mb, '#818cf8') +
+                    svg_bars('Переподключения', labels, rec, '#f472b6') +
+                    svg_bars('Активность (интервалов по 5 мин)', labels, on, '#fbbf24') +
+                    '</div>'
+                )
+
+        html = html.replace("__CARDS__", cards).replace("__CHARTS__", charts)
+        html = html.replace("__TABLE__", table).replace("__NOTE__", note)
 
         http_rows = stats_http(period, day)
         if http_rows:

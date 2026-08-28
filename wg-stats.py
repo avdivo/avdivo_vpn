@@ -19,7 +19,10 @@ from datetime import datetime
 
 DB = '/var/lib/wg-stats/wg-stats.db'
 DEVICES_CSV = '/etc/wireguard-config/devices.csv'
-RETENTION_DAYS = 30  # сколько хранить детальные точки samples
+# Детальные точки (каждые 5 минут) храним несколько дней — за это время видно
+# кто как работает сегодня и вчера; дальше их место занимают дневные агрегаты
+# (таблица daily живёт вечно и хранит сутки целиком).
+RETENTION_DAYS = 3
 
 
 def run(*args):
