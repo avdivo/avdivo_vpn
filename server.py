@@ -212,6 +212,8 @@ LOGIN_HTML = """\
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>avdivo VPN</title>
+<link rel="icon" type="image/png" href="/wg/favicon.png">
+<link rel="apple-touch-icon" href="/wg/apple-touch-icon.png">
 <style>
   *,*::before,*::after{box-sizing:border-box}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Oxygen,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;display:flex;align-items:center;justify-content:center;margin:0;padding:1rem}
@@ -246,6 +248,8 @@ ADMIN_HTML = """\
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>avdivo VPN — админка</title>
+<link rel="icon" type="image/png" href="/wg/favicon.png">
+<link rel="apple-touch-icon" href="/wg/apple-touch-icon.png">
 <style>
   *,*::before,*::after{box-sizing:border-box}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Oxygen,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:2rem 1rem}
@@ -334,6 +338,8 @@ STATS_HTML = """\
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>avdivo VPN — статистика</title>
+<link rel="icon" type="image/png" href="/wg/favicon.png">
+<link rel="apple-touch-icon" href="/wg/apple-touch-icon.png">
 <style>
   *,*::before,*::after{box-sizing:border-box}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Oxygen,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:2rem 1rem}
@@ -592,6 +598,19 @@ class Handler(BaseHTTPRequestHandler):
         self._send_html(html)
 
     def do_GET(self):
+        if self.path.startswith("/wg/favicon") or self.path.startswith("/wg/apple-touch-icon"):
+            fname = os.path.basename(self.path)
+            path = os.path.join(WG_DIR, fname)
+            if os.path.exists(path):
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.end_headers()
+                with open(path, "rb") as f:
+                    self.wfile.write(f.read())
+                return
+            self.send_error(404)
+            return
+
         if self.path.startswith("/wg/stats"):
             if not self._authed():
                 self._redirect("Требуется вход", err=True)
