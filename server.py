@@ -375,7 +375,7 @@ def svg_lines(title, labels, series, colors):
         return ""
     pad = 8
     width = 680
-    h, top, gap = 100, 12, 20
+    h, top, gap = 150, 14, 20
     plot_h = h - top - gap
     all_vals = [v for _, vals in series for v in vals]
     max_val = max(all_vals) if all_vals else 1
@@ -632,7 +632,7 @@ __NOTE__
 function toggleCharts(){
   var e = document.getElementById('charts');
   var b = document.getElementById('charts-btn');
-  e.style.display = (e.style.display === 'none') ? 'grid' : 'none';
+  e.style.display = (e.style.display === 'none') ? 'block' : 'none';
   b.textContent = (e.style.display === 'none') ? 'Показать графики' : 'Скрыть графики';
 }
 </script>
@@ -836,20 +836,41 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 table = '<div class="empty">Нет данных за выбранный период.</div>'
         else:
-            rows = stats_points(period, peer, day=day)
-            if rows:
-                head = '<tr><th>Время</th><th>Устройство</th><th>Скачал</th><th>Отдал</th><th>Статус</th></tr>'
-                body = "".join(
-                    f'<tr><td class="muted">{t}</td><td>{name}</td><td>{human_bytes(tx)}</td>'
-                    f'<td>{human_bytes(rx)}</td><td><span class="badge {"badge-on" if on else "badge-off"}">'
-                    f'{"активен" if on else "в сети"}</span></td></tr>'
-                    for t, name, rx, tx, on in rows
-                )
-                table = bread_html + f"<table>{head}{body}</table>"
-                day_note = f" за {day[8:]}.{day[5:7]}.{day[:4]}" if day else ""
-                note = f'<div class="note">Точки (каждая — 5 минут){day_note}. Показаны последние 200.</div>'
+            # «Детально»: сегодня или конкретный день — точки по 5 минут,
+            # длинные периоды (7/30 дней, всё время) — сводка по дням.
+            if day or period == "today":
+                rows = stats_points(period, peer, day=day)
+                if rows:
+                    head = '<tr><th>Время</th><th>Устройство</th><th>Скачал</th><th>Отдал</th><th>Статус</th></tr>'
+                    body = "".join(
+                        f'<tr><td class="muted">{t}</td><td>{name}</td><td>{human_bytes(tx)}</td>'
+                        f'<td>{human_bytes(rx)}</td><td><span class="badge {"badge-on" if on else "badge-off"}">'
+                        f'{"активен" if on else "в сети"}</span></td></tr>'
+                        for t, name, rx, tx, on in rows
+                    )
+                    table = bread_html + f"<table>{head}{body}</table>"
+                    day_note = f" за {day[8:]}.{day[5:7]}.{day[:4]}" if day else ""
+                    note = f'<div class="note">Точки (каждая — 5 минут){day_note}. Показаны последние 200.</div>'
+                else:
+                    table = '<div class="empty">Нет данных за выбранный период.</div>'
             else:
-                table = '<div class="empty">Нет данных за выбранный период.</div>'
+                rows = stats_days(period, peer)
+                if rows:
+                    head = ('<tr><th>День</th><th>Устройство</th><th>Скачал</th><th>Отдал</th>'
+                            '<th>Активность</th><th>Переподключ.</th></tr>')
+                    body_parts = []
+                    for d, pkey, name, rx, tx, act, rec in rows:
+                        d_show = f"{d[8:]}.{d[5:7]}.{d[:4]}"
+                        day_link = f'<a class="link" href="{stat_url(peer=pkey, view="points", day=d)}">{d_show}</a>'
+                        body_parts.append(
+                            f'<tr><td>{day_link}</td><td>{name}</td>'
+                            f'<td>{human_bytes(tx)}</td><td>{human_bytes(rx)}</td>'
+                            f'<td>{act}</td><td>{rec}</td></tr>'
+                        )
+                    table = bread_html + f"<table>{head}{''.join(body_parts)}</table>"
+                    note = '<div class="note">Длительный период — сводка по дням. Клик по дню — точки за этот день.</div>'
+                else:
+                    table = '<div class="empty">Нет данных за выбранный период.</div>'
 
         if view in ("peers", "points"):
             kind, series = stats_series(period, peer, day)
@@ -857,14 +878,9 @@ class Handler(BaseHTTPRequestHandler):
                 labels = [s[0] for s in series]
                 tx_mb = [round(s[2] / 1048576, 1) for s in series]
                 rx_mb = [round(s[1] / 1048576, 1) for s in series]
-                rec = [s[4] for s in series]
-                on = [s[3] for s in series]
-                charts = (
-                    '<div class="charts">' +
-                    svg_lines('Трафик, МБ', labels, [('Скачал', tx_mb), ('Отдал', rx_mb)], ['#34d399', '#818cf8']) +
-                    svg_bars('Активность', labels, on, '#fbbf24') +
-                    svg_bars('Переподключения', labels, rec, '#f472b6') +
-                    '</div>'
+                charts = svg_lines(
+                    'Трафик, МБ (скачал/отдал)', labels,
+                    [('Скачал', tx_mb), ('Отдал', rx_mb)], ['#34d399', '#818cf8'],
                 )
 
         html = html.replace("__CARDS__", cards).replace("__CHARTS__", charts)
