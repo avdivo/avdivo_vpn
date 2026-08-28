@@ -188,6 +188,23 @@ def stats_peer_options():
     return [(p, dev.get(p, n or "unknown")) for p, n in rows]
 
 
+def stats_http(period):
+    """HTTP-запросы к сайтам за период: (host, requests, wg_requests)."""
+    db = stats_db()
+    if db is None:
+        return []
+    _, start_day = stats_window(period)
+    try:
+        rows = db.execute(
+            "SELECT host, SUM(requests), SUM(wg_requests) FROM http_daily "
+            "WHERE day >= ? GROUP BY host ORDER BY SUM(requests) DESC", (start_day,)).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        db.close()
+    return rows
+
+
 LOGIN_HTML = """\
 <!DOCTYPE html>
 <html lang="ru">
@@ -382,6 +399,7 @@ STATS_HTML = """\
 </form>
 __CARDS__
 __TABLE__
+__HTTP__
 __NOTE__
 </div>
 </body>
@@ -545,6 +563,32 @@ class Handler(BaseHTTPRequestHandler):
                 table = '<div class="empty">Нет данных за выбранный период.</div>'
 
         html = html.replace("__CARDS__", cards).replace("__TABLE__", table).replace("__NOTE__", note)
+
+        http_rows = stats_http(period)
+        http_section = ""
+        if http_rows:
+            total = sum(r[1] for r in http_rows)
+            wg_total = sum(r[2] for r in http_rows)
+            http_cards = (
+                CARD_TPL.format(key="HTTP-запросов всего", value=f"{total}") +
+                CARD_TPL.format(key="К админке VPN (/wg)", value=f"{wg_total}")
+            )
+            rows_html = "".join(
+                f'<tr><td>{host}</td><td>{r}</td><td>{w}</td></tr>'
+                for host, r, w in http_rows
+            )
+            http_section = (
+                '<h3 style="margin:2rem 0 .5rem;font-size:1.05rem;color:#e2e8f0">'
+                'Запросы к сайтам на сервере (Caddy)</h3>' +
+                f'<div class="cards">{http_cards}</div>' +
+                '<table><tr><th>Домен</th><th>Запросов</th><th>К админке VPN (/wg)</th></tr>' +
+                rows_html + '</table>' +
+                '<div class="note">Это количество HTTP-запросов к нашим сайтам '
+                '(vpn/espocrm/landing и т.д.), а не трафик VPN-пользователей — '
+                'он идёт мимо Caddy.</div>'
+            )
+
+        html = html.replace("__HTTP__", http_section)
         self._send_html(html)
 
     def do_GET(self):
