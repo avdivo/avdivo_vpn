@@ -47,9 +47,47 @@ vpn.alexlenaai.com {
 
 ```
 ├── server.py              # HTTP-сервер
+├── wg-stats.py            # Сбор статистики по пирам (cron, раз в 5 минут)
+├── wg-stats-report.py     # Отчёт по статистике за период
 ├── client.conf.template   # Шаблон конфига
 ├── avdivo-vpn.service     # systemd unit
 ├── .env.example           # Шаблон переменных
 ├── .gitignore
 └── README.md
 ```
+
+## Статистика по устройствам
+
+WireGuard сам не хранит историю трафика (только текущие счётчики). Сбор
+ведётся скриптом `wg-stats.py` по cron и складывается в SQLite
+`/var/lib/wg-stats/wg-stats.db`:
+
+- **samples** — точки каждые 5 минут (трафик за интервал, активность,
+  переподключения); хранятся 30 дней, удаляются автоматически;
+- **peers** — текущие счётчики пиров (для расчёта дельт);
+- **daily** — дневные агрегаты (хранятся вечно, ~5 строк в день).
+
+Нагрузка на сервер нулевая (лёгкий процесс раз в 5 минут, БД маленькая).
+
+### Установка сбора
+
+```bash
+# в /etc/cron.d/wg-stats:
+*/5 * * * * root /usr/bin/python3 /etc/wireguard-config/wg-stats.py >> /var/log/wg-stats.log 2>&1
+systemctl restart cron
+```
+
+### Отчёт
+
+```bash
+python3 /etc/wireguard-config/wg-stats-report.py today   # за сегодня
+python3 /etc/wireguard-config/wg-stats-report.py week    # за 7 дней
+python3 /etc/wireguard-config/wg-stats-report.py month   # за 30 дней
+python3 /etc/wireguard-config/wg-stats-report.py all     # за всё время
+python3 /etc/wireguard-config/wg-stats-report.py 2026-08-01 2026-08-15  # произвольный период
+```
+
+Показывает по каждому устройству: скачано/отдано, активные интервалы (когда
+устройство передавало данные или подключалось) и переподключения (смены
+handshake). WireGuard измеряет байты и handshake, а не «запросы» — активность
+и переподключения и есть метрика «обращений» по пиру.
