@@ -834,7 +834,7 @@ class Handler(BaseHTTPRequestHandler):
                     body = "".join(
                         f'<tr><td class="muted">{t}</td><td>{name}</td><td>{human_bytes(tx)}</td>'
                         f'<td>{human_bytes(rx)}</td><td><span class="badge {"badge-on" if on else "badge-off"}">'
-                        f'{"активен" if on else "в сети"}</span></td></tr>'
+                        f'{"активен" if on else "неактивен"}</span></td></tr>'
                         for t, name, rx, tx, on in rows
                     )
                     table = bread_html + f"<table>{head}{body}</table>"
